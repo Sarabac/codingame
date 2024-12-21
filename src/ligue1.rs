@@ -12,25 +12,45 @@ pub fn main() {
 }
 
 mod ai {
-    use super::main_objects::*;
+    use std::rc::Rc;
 
-    pub fn make_decision(_state: GameState) -> Decision {
-        Decision::Wait
+    use itertools::iproduct;
+
+    use super::{base_objects::*, main_objects::*};
+
+    pub fn make_decision(state: GameState) -> Decision {
+        generer(Rc::new(state))
     }
 
-    fn generer_decisions(state: &impl State) -> impl Iterator<Item = Decision> {
-
+    fn generer(state: Rc<dyn State>) -> Decision {
+        state
+            .fertile_coords()
+            .into_iter()
+            .flat_map(|(parent_id, coord)| generer_decisions(parent_id, coord))
+            .filter_map(|decision| GameStep::try_new(state.clone(), decision))
+            .max_by(|a, b| juger(a).cmp(&juger(b)))
+            .map(|game_step| game_step.first_decision())
+            .unwrap_or(Decision::Wait)
     }
 
-    fn juger(state: &impl State) -> f32 {
-        let nb_harvesting: u16 = state.harvesting().len().try_into().expect("trop d'harvesting");
-        let note_nb_harvesting = f32::from(nb_harvesting.min(3)) * 4f32;
+    fn generer_decisions(parent_id: Id, coord: Coord) -> impl Iterator<Item = Decision> {
+        iproduct!([OrganeType::Basic, OrganeType::Harvester], Direction::all()).map(
+            move |(organe_type, direction)| {
+                Decision::Grow(parent_id, coord, organe_type, direction)
+            },
+        )
+    }
 
-        return 1f32 + note_nb_harvesting;
+    fn juger(state: &impl State) -> usize {
+        let nb_harvesting = state.harvesting().len();
+        let note_nb_harvesting = nb_harvesting.min(3) * 4;
+
+        return 1 + note_nb_harvesting;
     }
 }
 
 mod main_objects {
+    use itertools::Itertools;
     use std::{
         collections::HashMap,
         fmt::{Debug, Display},
@@ -39,6 +59,7 @@ mod main_objects {
 
     use super::base_objects::*;
 
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub enum Decision {
         Wait,
         Grow(Id, Coord, OrganeType, Direction),
@@ -60,10 +81,13 @@ mod main_objects {
     }
 
     pub trait State {
+        fn first_decision(&self) -> Decision;
         fn get_max_ami_id(&self) -> Id;
         fn get_ami_ressource(&self) -> Ressource;
         fn next_ami_ressource(&self) -> Ressource {
-            self.harvesting().into_iter().fold(self.get_ami_ressource(), |res, prot| res.ajout(prot))
+            self.harvesting()
+                .into_iter()
+                .fold(self.get_ami_ressource(), |res, prot| res.ajout(prot))
         }
         fn get_coord(&self, coord: Coord) -> Option<&Cell>;
 
@@ -89,10 +113,28 @@ mod main_objects {
         }
 
         fn get_neighbour(&self, coor: Coord) -> Vec<&Cell> {
-            [Direction::N, Direction::S, Direction::E, Direction::W]
+            Direction::all()
                 .into_iter()
-                .filter_map(|direction| coor.decaler(direction))
+                .filter_map(|direction| coor.decaler(direction.clone()))
                 .filter_map(|co| self.get_coord(co))
+                .collect()
+        }
+
+        fn fertile_coords(&self) -> Vec<(Id, Coord)> {
+            self.iter_values()
+                .filter_map(|cell| match cell.entity {
+                    Entity::Organe(organe) if organe.owner == Owner::Me => {
+                        Some((organe.id, cell.coord))
+                    }
+                    _ => None,
+                })
+                .flat_map(|(parent_id, parent_coord)| {
+                    self.get_neighbour(parent_coord)
+                        .into_iter()
+                        .filter(|cell| cell.can_grow())
+                        .map(move |cell| (parent_id, cell.coord))
+                })
+                .unique_by(|(_parent_id, coord)| coord.clone())
                 .collect()
         }
     }
@@ -123,10 +165,17 @@ mod main_objects {
                 })
                 .max()
                 .unwrap_or_default();
-            let coords: HashMap<Coord, Cell> = cells
-                .into_iter()
-                .map(|cell| (cell.coord.clone(), cell))
-                .collect();
+            let mut coords: HashMap<Coord, Cell> =
+                cells.into_iter().map(|cell| (cell.coord, cell)).collect();
+            for x in 0..(dimension.height) {
+                for y in 0..(dimension.width) {
+                    let coord = Coord { x, y };
+                    coords.entry(coord).or_insert(Cell {
+                        coord,
+                        entity: Entity::Void,
+                    });
+                }
+            }
             Self {
                 dimension,
                 ressources: ressources_ami,
@@ -145,6 +194,10 @@ mod main_objects {
     }
 
     impl State for GameState {
+        fn first_decision(&self) -> Decision {
+            Decision::Wait
+        }
+
         fn get_max_ami_id(&self) -> Id {
             self.max_ami_id
         }
@@ -203,6 +256,15 @@ mod main_objects {
     }
 
     impl State for GameStep {
+        fn first_decision(&self) -> Decision {
+            let prev = self.previous.first_decision();
+            if prev == Decision::Wait {
+                self.current
+            } else {
+                prev
+            }
+        }
+
         fn get_max_ami_id(&self) -> Id {
             self.cell_change
                 .and_then(|val| match val.entity {
@@ -251,6 +313,12 @@ mod base_objects {
         E,
         S,
         W,
+    }
+
+    impl Direction {
+        pub fn all() -> [Direction; 4] {
+            [Direction::N, Direction::S, Direction::E, Direction::W]
+        }
     }
 
     impl ToString for Direction {
@@ -331,6 +399,16 @@ mod base_objects {
         pub entity: Entity,
     }
 
+    impl Cell {
+        pub fn can_grow(&self) -> bool {
+            match self.entity {
+                Entity::Void => true,
+                Entity::Protein(_) => true,
+                _ => false,
+            }
+        }
+    }
+
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub enum Owner {
         Me,
@@ -389,13 +467,21 @@ mod base_objects {
         pub fn ajout(self, prot: Protein) -> Self {
             let Ressource([mut a, mut b, mut c, mut d]) = self;
             match prot {
-                Protein::A => {a += 1;}, 
-                Protein::B => {b += 1;}, 
-                Protein::C => {c += 1;}, 
-                Protein::D => {d += 1;}, 
+                Protein::A => {
+                    a += 1;
+                }
+                Protein::B => {
+                    b += 1;
+                }
+                Protein::C => {
+                    c += 1;
+                }
+                Protein::D => {
+                    d += 1;
+                }
             };
             Self([a, b, c, d])
-        } 
+        }
     }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
