@@ -16,9 +16,9 @@ pub mod ai {
 
     use itertools::iproduct;
 
-    use super::{base_objects::*, main_objects::*};
+    use super::{base_objects::*, decision::*, state::*};
 
-    pub fn make_decision(state: GameState) -> Decision {
+    pub fn make_decision(state: InitState) -> Decision {
         generer(Rc::new(state))
     }
 
@@ -26,17 +26,20 @@ pub mod ai {
         state
             .fertile_coords()
             .into_iter()
-            .flat_map(|(parent_id, coord)| generer_decisions(parent_id, coord))
-            .filter_map(|decision| GameStep::try_new(state.clone(), decision))
+            .flat_map(|(parent_id, coord)| generer_grow(parent_id, coord))
+            .filter_map(|decision| GrowStep::try_new(state.clone(), decision))
             .max_by(|a, b| juger(a).cmp(&juger(b)))
-            .map(|game_step| game_step.first_decision())
+            .and_then(|game_step| game_step.first_decision())
             .unwrap_or(Decision::Wait)
     }
 
-    fn generer_decisions(parent_id: Id, coord: Coord) -> impl Iterator<Item = Decision> {
+    fn generer_grow(parent_id: Id, coord: Coord) -> impl Iterator<Item = Grow> {
         iproduct!([OrganeType::Basic, OrganeType::Harvester], Direction::all()).map(
-            move |(organe_type, direction)| {
-                Decision::Grow(parent_id, coord, organe_type, direction)
+            move |(organe_type, direction)| Grow {
+                parent_id,
+                coord,
+                organe_type,
+                direction,
             },
         )
     }
@@ -46,13 +49,16 @@ pub mod ai {
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
         let resources = state.get_ami_ressource();
-        let note_resources = Protein::all().into_iter().filter(|p|  resources.get(p) != 0).count();
+        let note_resources = Protein::all()
+            .into_iter()
+            .filter(|p| resources.get(p) != 0)
+            .count();
 
         return 1 + note_nb_harvesting + note_resources;
     }
 }
 
-pub mod main_objects {
+pub mod state {
     use itertools::Itertools;
     use std::{
         collections::HashMap,
@@ -60,44 +66,19 @@ pub mod main_objects {
         rc::Rc,
     };
 
-    use super::base_objects::*;
-
-    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-    pub enum Decision {
-        Wait,
-        Grow(Id, Coord, OrganeType, Direction),
-    }
-
-    impl ToString for Decision {
-        fn to_string(&self) -> String {
-            match self {
-                Decision::Wait => "WAIT".to_string(),
-                Decision::Grow(id, coord, organe_type, direction) => format!(
-                    "GROW {} {} {} {}",
-                    id.to_string(),
-                    coord.to_string(),
-                    organe_type.to_string(),
-                    direction.to_string()
-                ),
-            }
-        }
-    }
+    use super::{base_objects::*, decision::*};
 
     pub trait State {
-        fn first_decision(&self) -> Decision;
+        fn first_decision(&self) -> Option<Decision>;
         fn get_max_ami_id(&self) -> Id;
         fn get_ami_ressource(&self) -> Ressource;
-        fn next_ami_ressource(&self) -> Ressource {
-            self.harvesting()
-                .into_iter()
-                .fold(self.get_ami_ressource(), |res, prot| res.ajout(prot))
-        }
         fn get_coord(&self, coord: Coord) -> Option<&Cell>;
 
         fn iter_values(&self) -> Vec<&Cell>;
 
         fn harvesting(&self) -> Vec<Protein> {
-            self.iter_values().into_iter()
+            self.iter_values()
+                .into_iter()
                 .filter_map(|cell| {
                     let Entity::Organe(organe) = cell.entity else {
                         return None;
@@ -123,15 +104,22 @@ pub mod main_objects {
                 .collect()
         }
 
-        fn fertile_coords(&self) -> Vec<(Id, Coord)> {
-            self.iter_values().into_iter()
+        fn organes_amis(&self) -> Vec<(Coord, Id)> {
+            self.iter_values()
+                .into_iter()
                 .filter_map(|cell| match cell.entity {
                     Entity::Organe(organe) if organe.owner == Owner::Me => {
-                        Some((organe.id, cell.coord))
+                        Some((cell.coord, organe.id))
                     }
                     _ => None,
                 })
-                .flat_map(|(parent_id, parent_coord)| {
+                .collect()
+        }
+
+        fn fertile_coords(&self) -> Vec<(Id, Coord)> {
+            self.organes_amis()
+                .into_iter()
+                .flat_map(|(parent_coord, parent_id)| {
                     self.get_neighbour(parent_coord)
                         .into_iter()
                         .filter(|cell| cell.can_grow())
@@ -143,7 +131,7 @@ pub mod main_objects {
     }
 
     #[derive(Debug, Clone, PartialEq, Eq)]
-    pub struct GameState {
+    pub struct InitState {
         dimension: Dimension,
         ressources: Ressource,
         ressources_ennemy: Ressource,
@@ -152,7 +140,7 @@ pub mod main_objects {
         max_ami_id: Id,
     }
 
-    impl GameState {
+    impl InitState {
         pub fn new(
             dimension: Dimension,
             ressources_ami: Ressource,
@@ -190,15 +178,15 @@ pub mod main_objects {
         }
     }
 
-    impl Display for GameState {
+    impl Display for InitState {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             Debug::fmt(&self, f)
         }
     }
 
-    impl State for GameState {
-        fn first_decision(&self) -> Decision {
-            Decision::Wait
+    impl State for InitState {
+        fn first_decision(&self) -> Option<Decision> {
+            None
         }
 
         fn get_max_ami_id(&self) -> Id {
@@ -217,88 +205,148 @@ pub mod main_objects {
         }
     }
 
-    pub struct GameStep {
+    pub struct GrowStep {
         previous: Rc<dyn State>,
-        current: Decision,
-        cell_change: Option<Cell>,
-        new_ami_ressource: Ressource,
+        current: Grow,
+        cell_change: Cell,
+        ami_ressource: Ressource,
     }
 
-    impl GameStep {
-        pub fn try_new(previous: Rc<dyn State>, current: Decision) -> Option<Self> {
-            let cell_change: Option<Cell>;
-            let prix_change: Ressource;
-            match current {
-                Decision::Wait => {
-                    cell_change = None;
-                    prix_change = Ressource::default()
-                }
-                Decision::Grow(parent_id, coo, organe_type, dir) => {
-                    cell_change = Some(Cell {
-                        coord: coo,
-                        entity: Entity::Organe(Organe {
-                            id: previous.get_max_ami_id().increment(),
-                            parent_id,
-                            root_id: Id::default(),
-                            organe_type,
-                            dir,
-                            owner: Owner::Me,
-                        }),
-                    });
-                    prix_change = organe_type.prix();
-                }
+    impl GrowStep {
+        pub fn try_new(previous: Rc<dyn State>, current: Grow) -> Option<Self> {
+            let cell_change: Cell = Cell {
+                coord: current.coord,
+                entity: Entity::Organe(Organe {
+                    id: previous.get_max_ami_id().increment(),
+                    parent_id: current.parent_id,
+                    root_id: Id::default(),
+                    organe_type: current.organe_type,
+                    dir: current.direction,
+                    owner: Owner::Me,
+                }),
             };
-            let new_ami_ressource = previous.next_ami_ressource().checked_sub(prix_change)?;
+            let ami_ressource = previous
+                .get_ami_ressource()
+                .checked_sub(current.organe_type.prix())?;
             Some(Self {
                 previous,
                 current,
                 cell_change,
-                new_ami_ressource,
+                ami_ressource,
             })
         }
     }
 
-    impl State for GameStep {
-        fn first_decision(&self) -> Decision {
-            let prev = self.previous.first_decision();
-            if prev == Decision::Wait {
-                self.current
-            } else {
-                prev
-            }
+    impl State for GrowStep {
+        fn first_decision(&self) -> Option<Decision> {
+            self.previous
+                .first_decision()
+                .or(Some(Decision::Grow(self.current)))
         }
 
         fn get_max_ami_id(&self) -> Id {
-            self.cell_change
-                .and_then(|val| match val.entity {
-                    Entity::Organe(organe) if organe.owner == Owner::Me => Some(organe.id),
-                    _ => None,
-                })
-                .unwrap_or_else(|| self.previous.get_max_ami_id())
+            match self.cell_change.entity {
+                Entity::Organe(organe) if organe.owner == Owner::Me => organe.id,
+                _ => self.previous.get_max_ami_id(),
+            }
         }
 
         fn get_ami_ressource(&self) -> Ressource {
-            self.new_ami_ressource
+            self.ami_ressource
         }
 
         fn get_coord(&self, coord: Coord) -> Option<&Cell> {
-            self.cell_change
-                .as_ref()
-                .filter(|cell| cell.coord == coord)
-                .or_else(|| self.previous.get_coord(coord))
+            if self.cell_change.coord == coord {
+                Some(&self.cell_change)
+            } else {
+                self.previous.get_coord(coord)
+            }
         }
 
         fn iter_values(&self) -> Vec<&Cell> {
-            self.previous.iter_values().into_iter().map(|cell| {
-                self.cell_change
-                    .as_ref()
-                    .filter(|change| change.coord == cell.coord)
-                    .unwrap_or(cell)
-            }).collect()
+            self.previous
+                .iter_values()
+                .into_iter()
+                .map(|cell| {
+                    if self.cell_change.coord == cell.coord {
+                        &self.cell_change
+                    } else {
+                        cell
+                    }
+                })
+                .collect()
+        }
+    }
+
+    pub struct EndTurn {
+        previous: Rc<dyn State>,
+    }
+
+    impl State for EndTurn {
+        fn get_coord(&self, coord: Coord) -> Option<&Cell> {
+            self.previous.get_coord(coord)
+        }
+
+        fn iter_values(&self) -> Vec<&Cell> {
+            self.previous.iter_values()
+        }
+
+        fn first_decision(&self) -> Option<Decision> {
+            self.previous.first_decision()
+        }
+
+        fn get_max_ami_id(&self) -> Id {
+            self.previous.get_max_ami_id()
+        }
+
+        fn get_ami_ressource(&self) -> Ressource {
+            self.harvesting()
+                .into_iter()
+                .fold(self.previous.get_ami_ressource(), |res, prot| {
+                    res.ajout(prot)
+                })
         }
     }
 }
 
+pub mod decision {
+    use super::base_objects::*;
+
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    pub enum Decision {
+        Wait,
+        Grow(Grow),
+    }
+
+    impl ToString for Decision {
+        fn to_string(&self) -> String {
+            match self {
+                Decision::Wait => "WAIT".to_string(),
+                Decision::Grow(grow) => grow.to_string(),
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    pub struct Grow {
+        pub parent_id: Id,
+        pub coord: Coord,
+        pub organe_type: OrganeType,
+        pub direction: Direction,
+    }
+
+    impl ToString for Grow {
+        fn to_string(&self) -> String {
+            format!(
+                "GROW {} {} {} {}",
+                self.parent_id.to_string(),
+                self.coord.to_string(),
+                self.organe_type.to_string(),
+                self.direction.to_string()
+            )
+        }
+    }
+}
 pub mod base_objects {
     use std::ops::Range;
 
@@ -465,11 +513,11 @@ pub mod base_objects {
 
     impl Ressource {
         pub fn new(a: u16, b: u16, c: u16, d: u16) -> Self {
-            Self{a, b ,c ,d}
+            Self { a, b, c, d }
         }
 
         pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-            Some(Self{
+            Some(Self {
                 a: self.a.checked_sub(rhs.a)?,
                 b: self.b.checked_sub(rhs.b)?,
                 c: self.c.checked_sub(rhs.c)?,
@@ -485,7 +533,7 @@ pub mod base_objects {
                 Protein::D => self.d,
             }
         }
- 
+
         pub fn ajout(mut self, prot: Protein) -> Self {
             match prot {
                 Protein::A => {
@@ -525,7 +573,7 @@ pub mod base_objects {
 mod parsing {
     use std::io;
 
-    use super::{base_objects::*, main_objects::GameState};
+    use super::{base_objects::*, state::InitState};
 
     pub fn parser_dimension() -> Dimension {
         let mut buf = String::new();
@@ -648,13 +696,13 @@ mod parsing {
         Ressource::new(a, b, c, d)
     }
 
-    pub fn parser_tour(dimension: Dimension) -> GameState {
+    pub fn parser_tour(dimension: Dimension) -> InitState {
         let entity_count = parser_count();
         let cells: Vec<Cell> = (0i32..entity_count).map(|_| parser_entity()).collect();
         let ressources_ami = parser_resource();
         let ressources_ennemy = parser_resource();
         let action_count = ActionCount::new(parser_count());
-        GameState::new(
+        InitState::new(
             dimension,
             ressources_ami,
             ressources_ennemy,
