@@ -11,7 +11,7 @@ pub fn main() {
     }
 }
 
-mod ai {
+pub mod ai {
     use std::rc::Rc;
 
     use itertools::iproduct;
@@ -22,7 +22,7 @@ mod ai {
         generer(Rc::new(state))
     }
 
-    fn generer(state: Rc<dyn State>) -> Decision {
+    pub fn generer(state: Rc<dyn State>) -> Decision {
         state
             .fertile_coords()
             .into_iter()
@@ -41,15 +41,18 @@ mod ai {
         )
     }
 
-    fn juger(state: &impl State) -> usize {
+    pub fn juger(state: &impl State) -> usize {
         let nb_harvesting = state.harvesting().len();
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
-        return 1 + note_nb_harvesting;
+        let resources = state.get_ami_ressource();
+        let note_resources = Protein::all().into_iter().filter(|p|  resources.get(p) != 0).count();
+
+        return 1 + note_nb_harvesting + note_resources;
     }
 }
 
-mod main_objects {
+pub mod main_objects {
     use itertools::Itertools;
     use std::{
         collections::HashMap,
@@ -91,10 +94,10 @@ mod main_objects {
         }
         fn get_coord(&self, coord: Coord) -> Option<&Cell>;
 
-        fn iter_values<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Cell> + 'a>;
+        fn iter_values(&self) -> Vec<&Cell>;
 
         fn harvesting(&self) -> Vec<Protein> {
-            self.iter_values()
+            self.iter_values().into_iter()
                 .filter_map(|cell| {
                     let Entity::Organe(organe) = cell.entity else {
                         return None;
@@ -121,7 +124,7 @@ mod main_objects {
         }
 
         fn fertile_coords(&self) -> Vec<(Id, Coord)> {
-            self.iter_values()
+            self.iter_values().into_iter()
                 .filter_map(|cell| match cell.entity {
                     Entity::Organe(organe) if organe.owner == Owner::Me => {
                         Some((organe.id, cell.coord))
@@ -167,8 +170,8 @@ mod main_objects {
                 .unwrap_or_default();
             let mut coords: HashMap<Coord, Cell> =
                 cells.into_iter().map(|cell| (cell.coord, cell)).collect();
-            for x in 0..(dimension.height) {
-                for y in 0..(dimension.width) {
+            for x in 0..(dimension.width) {
+                for y in 0..(dimension.height) {
                     let coord = Coord { x, y };
                     coords.entry(coord).or_insert(Cell {
                         coord,
@@ -209,8 +212,8 @@ mod main_objects {
             self.coords.get(&coord)
         }
 
-        fn iter_values<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Cell> + 'a> {
-            Box::new(self.coords.values().into_iter())
+        fn iter_values(&self) -> Vec<&Cell> {
+            self.coords.values().collect_vec()
         }
     }
 
@@ -285,18 +288,18 @@ mod main_objects {
                 .or_else(|| self.previous.get_coord(coord))
         }
 
-        fn iter_values<'a>(&'a self) -> Box<dyn Iterator<Item = &'a Cell> + 'a> {
-            Box::new(self.previous.iter_values().map(|cell| {
+        fn iter_values(&self) -> Vec<&Cell> {
+            self.previous.iter_values().into_iter().map(|cell| {
                 self.cell_change
                     .as_ref()
                     .filter(|change| change.coord == cell.coord)
                     .unwrap_or(cell)
-            }))
+            }).collect()
         }
     }
 }
 
-mod base_objects {
+pub mod base_objects {
     use std::ops::Range;
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -305,6 +308,12 @@ mod base_objects {
         B,
         C,
         D,
+    }
+
+    impl Protein {
+        pub fn all() -> [Self; 4] {
+            [Self::A, Self::B, Self::C, Self::D]
+        }
     }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -447,40 +456,52 @@ mod base_objects {
     }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
-    pub struct Ressource([u16; 4]);
+    pub struct Ressource {
+        a: u16,
+        b: u16,
+        c: u16,
+        d: u16,
+    }
+
     impl Ressource {
         pub fn new(a: u16, b: u16, c: u16, d: u16) -> Self {
-            Ressource([a, b, c, d])
+            Self{a, b ,c ,d}
         }
 
         pub fn checked_sub(self, rhs: Self) -> Option<Self> {
-            let Ressource([a1, b1, c1, d1]) = self;
-            let Ressource([a2, b2, c2, d2]) = rhs;
-            Some(Ressource([
-                a1.checked_sub(a2)?,
-                b1.checked_sub(b2)?,
-                c1.checked_sub(c2)?,
-                d1.checked_sub(d2)?,
-            ]))
+            Some(Self{
+                a: self.a.checked_sub(rhs.a)?,
+                b: self.b.checked_sub(rhs.b)?,
+                c: self.c.checked_sub(rhs.c)?,
+                d: self.d.checked_sub(rhs.d)?,
+            })
         }
 
-        pub fn ajout(self, prot: Protein) -> Self {
-            let Ressource([mut a, mut b, mut c, mut d]) = self;
+        pub fn get(&self, prot: &Protein) -> u16 {
+            match prot {
+                Protein::A => self.a,
+                Protein::B => self.b,
+                Protein::C => self.c,
+                Protein::D => self.d,
+            }
+        }
+ 
+        pub fn ajout(mut self, prot: Protein) -> Self {
             match prot {
                 Protein::A => {
-                    a += 1;
+                    self.a += 1;
                 }
                 Protein::B => {
-                    b += 1;
+                    self.b += 1;
                 }
                 Protein::C => {
-                    c += 1;
+                    self.c += 1;
                 }
                 Protein::D => {
-                    d += 1;
+                    self.d += 1;
                 }
             };
-            Self([a, b, c, d])
+            self
         }
     }
 
