@@ -16,21 +16,49 @@ pub mod ai {
 
     use itertools::iproduct;
 
-    use super::{base_objects::*, decision::*, state::*};
+    use super::{atome::*, decision::*, state::*};
 
     pub fn make_decision(state: InitState) -> Decision {
-        generer(Rc::new(state))
+        planifier(Rc::new(state), 2)
+            .take_first_turn()
+            .into_iter()
+            .next()
+            .unwrap_or_default()
     }
 
-    pub fn generer(state: Rc<dyn State>) -> Decision {
-        state
-            .fertile_coords()
+    pub fn planifier(state: Rc<dyn State>, rec: usize) -> Planification {
+        let mut states = vec![state];
+        for _i in 0..rec {
+            states = realiser_tour(states)
+                .into_iter()
+                .map(|s| Rc::new(s) as Rc<dyn State>)
+                .collect()
+        }
+
+        states
             .into_iter()
-            .flat_map(|(parent_id, coord)| generer_grow(parent_id, coord))
-            .filter_map(|decision| GrowStep::try_new(state.clone(), decision))
-            .max_by(|a, b| juger(a).cmp(&juger(b)))
-            .and_then(|game_step| game_step.first_decision())
-            .unwrap_or(Decision::Wait)
+            .max_by(|a, b| juger(a.clone()).cmp(&juger(b.clone())))
+            .map(|s| s.planification())
+            .unwrap_or_default()
+    }
+
+    fn realiser_tour(mut process: Vec<Rc<dyn State>>) -> Vec<EndTurn> {
+        let mut retour: Vec<EndTurn> = Vec::new();
+        while !process.is_empty() {
+            let (finis, encore) = process
+                .into_iter()
+                .flat_map(|s| {
+                    s.fertile_coords()
+                        .into_iter()
+                        .flat_map(|(parent_id, coord)| generer_grow(parent_id, coord))
+                        .filter_map(move |grow| GrowStep::try_new(s.clone(), grow))
+                })
+                .map(|s| Rc::new(s) as Rc<dyn State>)
+                .partition(|s| s.get_action_count().is_null());
+            process = encore;
+            retour.extend(finis.into_iter().map(EndTurn::new));
+        }
+        retour
     }
 
     fn generer_grow(parent_id: Id, coord: Coord) -> impl Iterator<Item = Grow> {
@@ -44,7 +72,7 @@ pub mod ai {
         )
     }
 
-    pub fn juger(state: &impl State) -> usize {
+    pub fn juger(state: Rc<dyn State>) -> usize {
         let nb_harvesting = state.harvesting().len();
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
@@ -66,10 +94,11 @@ pub mod state {
         rc::Rc,
     };
 
-    use super::{base_objects::*, decision::*};
+    use super::{atome::*, decision::*};
 
     pub trait State {
-        fn first_decision(&self) -> Option<Decision>;
+        fn planification(&self) -> Planification;
+        fn get_action_count(&self) -> ActionCount;
         fn get_max_ami_id(&self) -> Id;
         fn get_ami_ressource(&self) -> Ressource;
         fn get_coord(&self, coord: Coord) -> Option<&Cell>;
@@ -185,8 +214,12 @@ pub mod state {
     }
 
     impl State for InitState {
-        fn first_decision(&self) -> Option<Decision> {
-            None
+        fn planification(&self) -> Planification {
+            Planification::default()
+        }
+
+        fn get_action_count(&self) -> ActionCount {
+            self.action_count
         }
 
         fn get_max_ami_id(&self) -> Id {
@@ -238,10 +271,14 @@ pub mod state {
     }
 
     impl State for GrowStep {
-        fn first_decision(&self) -> Option<Decision> {
+        fn planification(&self) -> Planification {
             self.previous
-                .first_decision()
-                .or(Some(Decision::Grow(self.current)))
+                .planification()
+                .add_decision(Decision::Grow(self.current))
+        }
+
+        fn get_action_count(&self) -> ActionCount {
+            self.previous.get_action_count().decrement()
         }
 
         fn get_max_ami_id(&self) -> Id {
@@ -282,17 +319,27 @@ pub mod state {
         previous: Rc<dyn State>,
     }
 
+    impl EndTurn {
+        pub fn new(state: Rc<dyn State>) -> Self {
+            Self { previous: state }
+        }
+    }
+
     impl State for EndTurn {
+        fn planification(&self) -> Planification {
+            self.previous.planification().new_turn()
+        }
+
         fn get_coord(&self, coord: Coord) -> Option<&Cell> {
             self.previous.get_coord(coord)
         }
 
-        fn iter_values(&self) -> Vec<&Cell> {
-            self.previous.iter_values()
+        fn get_action_count(&self) -> ActionCount {
+            ActionCount::default()
         }
 
-        fn first_decision(&self) -> Option<Decision> {
-            self.previous.first_decision()
+        fn iter_values(&self) -> Vec<&Cell> {
+            self.previous.iter_values()
         }
 
         fn get_max_ami_id(&self) -> Id {
@@ -310,10 +357,11 @@ pub mod state {
 }
 
 pub mod decision {
-    use super::base_objects::*;
+    use super::atome::*;
 
-    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
     pub enum Decision {
+        #[default]
         Wait,
         Grow(Grow),
     }
@@ -347,8 +395,9 @@ pub mod decision {
         }
     }
 }
-pub mod base_objects {
-    use std::ops::Range;
+
+pub mod atome {
+    use super::decision::Decision;
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub enum Protein {
@@ -554,18 +603,55 @@ pub mod base_objects {
     }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
-    pub struct ActionCount(i32);
+    pub struct ActionCount(u32);
     impl ActionCount {
-        pub fn new(count: i32) -> Self {
+        pub fn new(count: u32) -> Self {
             Self(count)
+        }
+
+        pub fn decrement(self) -> Self {
+            Self(self.0.saturating_sub(1))
+        }
+
+        pub fn is_null(&self) -> bool {
+            self.0.eq(&0)
         }
     }
 
-    impl IntoIterator for ActionCount {
-        type IntoIter = Range<i32>;
-        type Item = i32;
-        fn into_iter(self) -> Self::IntoIter {
-            0..self.0
+    impl Default for ActionCount {
+        fn default() -> Self {
+            Self(1)
+        }
+    }
+
+    #[derive(Debug, Clone, Hash, PartialEq, Eq)]
+    pub struct Planification {
+        content: Vec<Vec<Decision>>,
+    }
+
+    impl Planification {
+        pub fn new_turn(mut self) -> Self {
+            self.content.push(Vec::new());
+            self
+        }
+
+        pub fn add_decision(mut self, decision: Decision) -> Self {
+            if let Some(turn) = self.content.last_mut() {
+                turn.push(decision);
+            };
+            self
+        }
+
+        pub fn take_first_turn(self) -> Vec<Decision> {
+            self.content.into_iter().next().unwrap_or_default()
+        }
+    }
+
+    impl Default for Planification {
+        fn default() -> Self {
+            Self {
+                content: vec![Vec::new()],
+            }
         }
     }
 }
@@ -573,7 +659,7 @@ pub mod base_objects {
 mod parsing {
     use std::io;
 
-    use super::{base_objects::*, state::InitState};
+    use super::{atome::*, state::InitState};
 
     pub fn parser_dimension() -> Dimension {
         let mut buf = String::new();
@@ -591,10 +677,10 @@ mod parsing {
         }
     }
 
-    fn parser_count() -> i32 {
+    fn parser_count() -> u32 {
         let mut buf = String::new();
         io::stdin().read_line(&mut buf).unwrap();
-        let mut inputs = buf.split(" ").map(str::trim).map(str::parse::<i32>);
+        let mut inputs = buf.split(" ").map(str::trim).map(str::parse);
         inputs
             .next()
             .expect("pas de entitycount")
@@ -698,7 +784,7 @@ mod parsing {
 
     pub fn parser_tour(dimension: Dimension) -> InitState {
         let entity_count = parser_count();
-        let cells: Vec<Cell> = (0i32..entity_count).map(|_| parser_entity()).collect();
+        let cells: Vec<Cell> = (0u32..entity_count).map(|_| parser_entity()).collect();
         let ressources_ami = parser_resource();
         let ressources_ennemy = parser_resource();
         let action_count = ActionCount::new(parser_count());

@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use codingame::ligue1::{ai::*, base_objects::*, decision::*, state::*};
+use codingame::ligue1::{ai::*, atome::*, decision::*, state::*};
 
 #[test]
 fn count_harvesting() {
@@ -86,7 +86,7 @@ fn harvesting_is_best() {
         action_count,
         cells,
     );
-    let decision = generer(Rc::new(state));
+    let decision = planifier(Rc::new(state), 1).take_first_turn().into_iter().next().unwrap_or_default();
     let expected = Grow {
         parent_id: Id::new(0),
         coord: Coord { x: 1, y: 0 },
@@ -129,15 +129,15 @@ fn no_harvesting_when_no_prot() {
         action_count,
         cells,
     );
-    let decision = generer(Rc::new(state));
-    let Decision::Grow(Grow {organe_type, .. }) = decision else {
+    let decision = planifier(Rc::new(state), 1).take_first_turn().into_iter().next().unwrap_or_default();
+    let Decision::Grow(Grow { organe_type, .. }) = decision else {
         panic!("pas de grow")
     };
     assert_eq!(organe_type, OrganeType::Basic);
 }
 
 #[test]
-fn bonnes_dimmensions() {
+fn bonnes_dimensions() {
     let dimension = Dimension {
         width: 4,
         height: 2,
@@ -158,10 +158,7 @@ fn bonnes_dimmensions() {
             entity: Entity::Void
         })
     );
-    
+
     let coo2 = Coord { x: 1, y: 3 };
-    assert_eq!(
-        state.get_coord(coo2),
-        None
-    );
+    assert_eq!(state.get_coord(coo2), None);
 }
