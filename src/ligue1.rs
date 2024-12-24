@@ -573,9 +573,9 @@ pub mod atome {
     }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
-    pub struct Id(u32);
+    pub struct Id(u8);
     impl Id {
-        pub fn new(id: u32) -> Self {
+        pub fn new(id: u8) -> Self {
             Id(id)
         }
         pub fn increment(self) -> Self {
@@ -631,8 +631,8 @@ pub mod atome {
     pub type CoordMap<T> = HashMap<Coord, T>;
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub struct Coord {
-        pub x: u16,
-        pub y: u16,
+        pub x: u8,
+        pub y: u8,
     }
 
     impl Coord {
@@ -656,20 +656,20 @@ pub mod atome {
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub struct Dimension {
-        pub height: u16,
-        pub width: u16,
+        pub height: u8,
+        pub width: u8,
     }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
     pub struct Ressource {
-        a: u16,
-        b: u16,
-        c: u16,
-        d: u16,
+        a: u8,
+        b: u8,
+        c: u8,
+        d: u8,
     }
 
     impl Ressource {
-        pub fn new(a: u16, b: u16, c: u16, d: u16) -> Self {
+        pub fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
             Self { a, b, c, d }
         }
 
@@ -682,7 +682,7 @@ pub mod atome {
             })
         }
 
-        pub fn get(&self, prot: &Protein) -> u16 {
+        pub fn get(&self, prot: &Protein) -> u8 {
             match prot {
                 Protein::A => self.a,
                 Protein::B => self.b,
@@ -772,16 +772,16 @@ mod parsing {
     pub fn parser_dimension() -> Dimension {
         let mut buf = String::new();
         io::stdin().read_line(&mut buf).unwrap();
-        let mut inputs = buf.split(" ").map(str::trim).map(str::parse::<u16>);
+        let mut inputs = buf.split(" ").map(str::trim).map(str::parse);
         Dimension {
             width: inputs
                 .next()
                 .expect("pas de width")
-                .expect("width pas un nombre"),
+                .unwrap_or(u8::MAX),
             height: inputs
                 .next()
                 .expect("pas de height")
-                .expect("height pas un nombre"),
+                .unwrap_or(u8::MAX),
         }
     }
 
@@ -869,24 +869,24 @@ mod parsing {
     fn parser_resource() -> Ressource {
         let mut buf = String::new();
         io::stdin().read_line(&mut buf).unwrap();
-        let mut inputs = buf.split(" ").map(str::trim).map(str::parse::<u16>);
+        let mut inputs = buf.split(" ").map(str::trim).map(str::parse);
         let a = inputs
             .next()
             .expect("pas de proteine A")
-            .expect("proteine A pas un nombre");
+            .unwrap_or(u8::MAX);
 
         let b = inputs
             .next()
             .expect("pas de proteine B")
-            .expect("proteine B pas un nombre");
+            .unwrap_or(u8::MAX);
         let c = inputs
             .next()
             .expect("pas de proteine C")
-            .expect("proteine C pas un nombre");
+            .unwrap_or(u8::MAX);
         let d = inputs
             .next()
             .expect("pas de proteine D")
-            .expect("proteine D pas un nombre");
+            .unwrap_or(u8::MAX);
         Ressource::new(a, b, c, d)
     }
 
