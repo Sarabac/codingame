@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
-use codingame::ligue1::{ai::*, atome::*, decision::*, state::*};
 use codingame::common::*;
+use codingame::ligue1::{ai::*, atome::*, decision::*};
 
 /**
  * -----------
@@ -22,13 +22,13 @@ fn va_harvester() {
     let plan = planifier(state, 3);
     let grow1 = Grow {
         coord: Coord { x: 1, y: 2 },
-        direction: Direction::W,
+        direction: Direction::N,
         parent_id: Id::new(0),
         organe_type: OrganeType::Basic,
     };
     let grow2 = Grow {
         coord: Coord { x: 2, y: 2 },
-        direction: Direction::W,
+        direction: Direction::N,
         parent_id: Id::new(1),
         organe_type: OrganeType::Basic,
     };

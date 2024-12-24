@@ -1,6 +1,6 @@
-use std::rc::Rc;
+use std::{collections::HashMap, rc::Rc};
 
-use codingame::ligue1::{ai::*, atome::*, decision::*, state::*};
+use codingame::ligue1::{ai::*, atome::*, decision::*, molecule::*, state::*};
 
 #[test]
 fn count_harvesting() {
@@ -50,7 +50,16 @@ fn count_harvesting() {
         action_count,
         cells,
     );
-    assert_eq!(state.harvesting(), vec![Protein::A]);
+    let mut expected: CoordMap<Harvesting> = HashMap::new();
+    expected.insert(
+        Coord { x: 2, y: 0 },
+        Harvesting {
+            protein: Protein::A,
+            direction: Direction::E,
+            harvester_coord: Coord { x: 1, y: 0 },
+        },
+    );
+    assert_eq!(state.harvesting(), expected);
 }
 
 #[test]
@@ -86,7 +95,11 @@ fn harvesting_is_best() {
         action_count,
         cells,
     );
-    let decision = planifier(Rc::new(state), 1).take_first_turn().into_iter().next().unwrap_or_default();
+    let decision = planifier(Rc::new(state), 1)
+        .take_first_turn()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let expected = Grow {
         parent_id: Id::new(0),
         coord: Coord { x: 1, y: 0 },
@@ -129,7 +142,11 @@ fn no_harvesting_when_no_prot() {
         action_count,
         cells,
     );
-    let decision = planifier(Rc::new(state), 1).take_first_turn().into_iter().next().unwrap_or_default();
+    let decision = planifier(Rc::new(state), 1)
+        .take_first_turn()
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     let Decision::Grow(Grow { organe_type, .. }) = decision else {
         panic!("pas de grow")
     };
@@ -153,7 +170,7 @@ fn bonnes_dimensions() {
     let coo1 = Coord { x: 3, y: 1 };
     assert_eq!(
         state.get_coord(coo1),
-        Some(&Cell {
+        Some(Cell {
             coord: coo1,
             entity: Entity::Void
         })

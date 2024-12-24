@@ -57,7 +57,7 @@ impl StateBuilder {
     }
 
     /**
-     * 
+     *
      * |.|.|.|.|.|
      * -----------
      * |.|.|.|.|.|
@@ -67,7 +67,7 @@ impl StateBuilder {
      * |.|.|.|.|.|
      * -----------
      * |.|.|.|.|.|
-     * 
+     *
      */
     pub fn new_a_gauche_prot_a_a_droite() -> Self {
         Self {

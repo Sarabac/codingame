@@ -14,9 +14,9 @@ pub fn main() {
 pub mod ai {
     use std::rc::Rc;
 
-    use itertools::iproduct;
+    use itertools::{iproduct, Itertools};
 
-    use super::{atome::*, decision::*, state::*};
+    use super::{atome::*, decision::*, molecule::Fertilite, state::*};
 
     pub fn make_decision(state: InitState) -> Decision {
         planifier(Rc::new(state), 2)
@@ -32,12 +32,14 @@ pub mod ai {
             states = realiser_tour(states)
                 .into_iter()
                 .map(|s| Rc::new(s) as Rc<dyn State>)
-                .collect()
+                .map(|s|(s.clone(), juger(s)))
+                .sorted_by(|(_, a), (_, b)| b.cmp(&a))
+                .map(|(s, _)| s)
+                .take(80)
+                .collect();
         }
 
-        states
-            .into_iter()
-            .max_by(|a, b| juger(a.clone()).cmp(&juger(b.clone())))
+        states.first()
             .map(|s| s.planification())
             .unwrap_or_default()
     }
@@ -50,18 +52,18 @@ pub mod ai {
                 .flat_map(|s| {
                     s.fertile_coords()
                         .into_iter()
-                        .flat_map(|(parent_id, coord)| generer_grow(parent_id, coord))
+                        .flat_map(|(coord, Fertilite { parent_id })| generer_grow(coord, parent_id))
                         .filter_map(move |grow| GrowStep::try_new(s.clone(), grow))
                 })
                 .map(|s| Rc::new(s) as Rc<dyn State>)
-                .partition(|s| s.get_action_count().is_null());
+                .partition(|s| s.action_count().is_null());
             process = encore;
             retour.extend(finis.into_iter().map(EndTurn::new));
         }
         retour
     }
 
-    fn generer_grow(parent_id: Id, coord: Coord) -> impl Iterator<Item = Grow> {
+    fn generer_grow(coord: Coord, parent_id: Id) -> impl Iterator<Item = Grow> {
         iproduct!([OrganeType::Basic, OrganeType::Harvester], Direction::all()).map(
             move |(organe_type, direction)| Grow {
                 parent_id,
@@ -76,85 +78,66 @@ pub mod ai {
         let nb_harvesting = state.harvesting().len();
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
-        let resources = state.get_ami_ressource();
+        let resources = state.ressource_ami();
         let note_resources = Protein::all()
             .into_iter()
             .filter(|p| resources.get(p) != 0)
             .count();
+        let nb_ami = state.organes_amis().len() * 3;
 
-        return 1 + note_nb_harvesting + note_resources;
+        return 1 + note_nb_harvesting + note_resources + nb_ami;
     }
 }
 
 pub mod state {
-    use itertools::Itertools;
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         fmt::{Debug, Display},
         rc::Rc,
     };
 
-    use super::{atome::*, decision::*};
+    use itertools::iproduct;
+
+    use super::{atome::*, decision::*, molecule::*};
 
     pub trait State {
         fn planification(&self) -> Planification;
-        fn get_action_count(&self) -> ActionCount;
-        fn get_max_ami_id(&self) -> Id;
-        fn get_ami_ressource(&self) -> Ressource;
-        fn get_coord(&self, coord: Coord) -> Option<&Cell>;
+        fn action_count(&self) -> ActionCount;
+        fn max_ami_id(&self) -> Id;
+        fn ressource_ami(&self) -> Ressource;
+        fn get_coord(&self, coord: Coord) -> Option<Cell>;
 
-        fn iter_values(&self) -> Vec<&Cell>;
+        fn harvesting(&self) -> CoordMap<Harvesting>;
+        fn empty_cell(&self) -> CoordMap<EmptyCell>;
+        fn protein(&self) -> CoordMap<Protein>;
+        fn organes_amis(&self) -> CoordMap<OrganeAmi>;
 
-        fn harvesting(&self) -> Vec<Protein> {
-            self.iter_values()
-                .into_iter()
-                .filter_map(|cell| {
-                    let Entity::Organe(organe) = cell.entity else {
-                        return None;
-                    };
-                    if OrganeType::Harvester != organe.organe_type || organe.owner != Owner::Me {
-                        return None;
-                    }
-                    let en_face = cell.coord.decaler(organe.dir)?;
-                    let cell_en_face = self.get_coord(en_face)?;
-                    match cell_en_face.entity {
-                        Entity::Protein(prot) => Some(prot),
-                        _ => None,
-                    }
-                })
-                .collect()
-        }
-
-        fn get_neighbour(&self, coor: Coord) -> Vec<&Cell> {
+        fn get_neighbour(&self, coor: Coord) -> [Option<Cell>; 4] {
             Direction::all()
-                .into_iter()
-                .filter_map(|direction| coor.decaler(direction.clone()))
-                .filter_map(|co| self.get_coord(co))
-                .collect()
+                .map(|direction| coor.decaler(direction.clone()))
+                .map(|co| self.get_coord(co?))
         }
 
-        fn organes_amis(&self) -> Vec<(Coord, Id)> {
-            self.iter_values()
-                .into_iter()
-                .filter_map(|cell| match cell.entity {
-                    Entity::Organe(organe) if organe.owner == Owner::Me => {
-                        Some((cell.coord, organe.id))
-                    }
-                    _ => None,
-                })
-                .collect()
-        }
-
-        fn fertile_coords(&self) -> Vec<(Id, Coord)> {
+        fn fertile_coords(&self) -> CoordMap<Fertilite> {
+            let empty_cell: HashSet<Coord> = self.empty_cell().keys().cloned().collect();
+            let prot: HashSet<Coord> = self.protein().keys().cloned().collect();
+            let empty_or_prot: HashSet<Coord> = empty_cell.union(&prot).cloned().collect();
             self.organes_amis()
                 .into_iter()
-                .flat_map(|(parent_coord, parent_id)| {
-                    self.get_neighbour(parent_coord)
+                .flat_map(|(coord, org_ami)| {
+                    self.get_neighbour(coord)
                         .into_iter()
-                        .filter(|cell| cell.can_grow())
-                        .map(move |cell| (parent_id, cell.coord))
+                        .filter_map(|c| c.clone())
+                        .filter(|c| empty_or_prot.contains(&c.coord))
+                        .map(move |c| {
+                            (
+                                c.coord,
+                                Fertilite {
+                                    parent_id: org_ami.id,
+                                },
+                            )
+                        }).collect::<CoordMap<Fertilite>>()
                 })
-                .unique_by(|(_parent_id, coord)| coord.clone())
                 .collect()
         }
     }
@@ -162,11 +145,15 @@ pub mod state {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct InitState {
         dimension: Dimension,
-        ressources: Ressource,
+        ressources_ami: Ressource,
         ressources_ennemy: Ressource,
         action_count: ActionCount,
-        coords: HashMap<Coord, Cell>,
         max_ami_id: Id,
+        coord_cells: CoordMap<Cell>,
+        empty_cells: CoordMap<EmptyCell>,
+        prot_cells: CoordMap<Protein>,
+        organe_ami_cells: CoordMap<OrganeAmi>,
+        harvesting_cells: CoordMap<Harvesting>,
     }
 
     impl InitState {
@@ -177,32 +164,62 @@ pub mod state {
             action_count: ActionCount,
             cells: Vec<Cell>,
         ) -> Self {
-            let max_ami_id = cells
-                .iter()
-                .filter_map(|cell| match cell.entity {
-                    Entity::Organe(Organe { id, owner, .. }) if owner == Owner::Me => Some(id),
-                    _ => None,
-                })
-                .max()
-                .unwrap_or_default();
-            let mut coords: HashMap<Coord, Cell> =
-                cells.into_iter().map(|cell| (cell.coord, cell)).collect();
-            for x in 0..(dimension.width) {
-                for y in 0..(dimension.height) {
-                    let coord = Coord { x, y };
-                    coords.entry(coord).or_insert(Cell {
-                        coord,
-                        entity: Entity::Void,
-                    });
-                }
+            let mut max_ami_id = Id::default();
+            let coord_cells: CoordMap<Cell> = cells.iter().map(|c| (c.coord, c.clone())).collect();
+            let mut prot_cells: CoordMap<Protein> = HashMap::new();
+            let mut empty_cells: CoordMap<EmptyCell> =
+                iproduct!(0..dimension.width, 0..dimension.height)
+                    .map(|(x, y)| (Coord { x, y }, EmptyCell))
+                    .collect();
+            let mut organe_ami_cells: CoordMap<OrganeAmi> = HashMap::new();
+            let mut harvesting_cells: CoordMap<Harvesting> = HashMap::new();
+
+            for cell in cells.into_iter() {
+                let Cell { coord, entity } = cell.clone();
+                empty_cells.remove(&coord);
+                match entity {
+                    Entity::Void => {}
+                    Entity::Wall => {}
+                    Entity::Protein(prot) => {
+                        prot_cells.insert(coord, prot);
+                    }
+                    Entity::Organe(org) if org.owner == Owner::Ennemy => {}
+                    Entity::Organe(org) => {
+                        max_ami_id = max_ami_id.max(org.id);
+                        organe_ami_cells.insert(coord, OrganeAmi { id: org.id });
+
+                        if org.organe_type == OrganeType::Harvester {
+                            let en_face =
+                                coord.decaler(org.dir).and_then(|coo| coord_cells.get(&coo));
+                            if let Some(Cell {
+                                coord: coord_prot,
+                                entity: Entity::Protein(prot),
+                            }) = en_face
+                            {
+                                harvesting_cells.insert(
+                                    coord_prot.clone(),
+                                    Harvesting {
+                                        protein: prot.clone(),
+                                        direction: org.dir,
+                                        harvester_coord: coord,
+                                    },
+                                );
+                            };
+                        }
+                    }
+                };
             }
             Self {
                 dimension,
-                ressources: ressources_ami,
+                ressources_ami,
                 ressources_ennemy,
                 action_count,
-                coords,
+                coord_cells,
                 max_ami_id,
+                empty_cells,
+                prot_cells,
+                organe_ami_cells,
+                harvesting_cells,
             }
         }
     }
@@ -217,54 +234,62 @@ pub mod state {
         fn planification(&self) -> Planification {
             Planification::default()
         }
-
-        fn get_action_count(&self) -> ActionCount {
+        fn action_count(&self) -> ActionCount {
             self.action_count
         }
-
-        fn get_max_ami_id(&self) -> Id {
+        fn max_ami_id(&self) -> Id {
             self.max_ami_id
         }
-        fn get_ami_ressource(&self) -> Ressource {
-            self.ressources
+        fn ressource_ami(&self) -> Ressource {
+            self.ressources_ami
+        }
+        fn get_coord(&self, coord: Coord) -> Option<Cell> {
+            match self.coord_cells.get(&coord) {
+                Some(cell) => Some(cell.clone()),
+                None if coord.x < self.dimension.width && coord.y < self.dimension.height => {
+                    Some(Cell {
+                        coord,
+                        entity: Entity::Void,
+                    })
+                }
+                None => None,
+            }
         }
 
-        fn get_coord(&self, coord: Coord) -> Option<&Cell> {
-            self.coords.get(&coord)
+        fn harvesting(&self) -> CoordMap<Harvesting> {
+            self.harvesting_cells.clone()
         }
 
-        fn iter_values(&self) -> Vec<&Cell> {
-            self.coords.values().collect_vec()
+        fn empty_cell(&self) -> CoordMap<EmptyCell> {
+            self.empty_cells.clone()
+        }
+
+        fn protein(&self) -> CoordMap<Protein> {
+            self.prot_cells.clone()
+        }
+
+        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
+            self.organe_ami_cells.clone()
         }
     }
 
     pub struct GrowStep {
         previous: Rc<dyn State>,
         current: Grow,
-        cell_change: Cell,
         ami_ressource: Ressource,
     }
 
     impl GrowStep {
         pub fn try_new(previous: Rc<dyn State>, current: Grow) -> Option<Self> {
-            let cell_change: Cell = Cell {
-                coord: current.coord,
-                entity: Entity::Organe(Organe {
-                    id: previous.get_max_ami_id().increment(),
-                    parent_id: current.parent_id,
-                    root_id: Id::default(),
-                    organe_type: current.organe_type,
-                    dir: current.direction,
-                    owner: Owner::Me,
-                }),
-            };
-            let ami_ressource = previous
-                .get_ami_ressource()
+            let mut ami_ressource = previous
+                .ressource_ami()
                 .checked_sub(current.organe_type.prix())?;
+            if let Some(prot) = previous.protein().get(&current.coord) {
+                ami_ressource = ami_ressource.ajout(prot.clone());
+            };
             Some(Self {
                 previous,
                 current,
-                cell_change,
                 ami_ressource,
             })
         }
@@ -277,41 +302,85 @@ pub mod state {
                 .add_decision(Decision::Grow(self.current))
         }
 
-        fn get_action_count(&self) -> ActionCount {
-            self.previous.get_action_count().decrement()
+        fn action_count(&self) -> ActionCount {
+            self.previous.action_count().decrement()
         }
 
-        fn get_max_ami_id(&self) -> Id {
-            match self.cell_change.entity {
-                Entity::Organe(organe) if organe.owner == Owner::Me => organe.id,
-                _ => self.previous.get_max_ami_id(),
-            }
+        fn max_ami_id(&self) -> Id {
+            self.previous.max_ami_id().increment()
         }
 
-        fn get_ami_ressource(&self) -> Ressource {
+        fn ressource_ami(&self) -> Ressource {
             self.ami_ressource
         }
 
-        fn get_coord(&self, coord: Coord) -> Option<&Cell> {
-            if self.cell_change.coord == coord {
-                Some(&self.cell_change)
+        fn get_coord(&self, coord: Coord) -> Option<Cell> {
+            if self.current.coord == coord {
+                Some(Cell {
+                    coord: self.current.coord,
+                    entity: Entity::Organe(Organe {
+                        id: self.max_ami_id(),
+                        parent_id: self.current.parent_id,
+                        root_id: Id::default(),
+                        organe_type: self.current.organe_type,
+                        dir: self.current.direction,
+                        owner: Owner::Me,
+                    }),
+                })
             } else {
                 self.previous.get_coord(coord)
             }
         }
 
-        fn iter_values(&self) -> Vec<&Cell> {
-            self.previous
-                .iter_values()
-                .into_iter()
-                .map(|cell| {
-                    if self.cell_change.coord == cell.coord {
-                        &self.cell_change
-                    } else {
-                        cell
-                    }
-                })
-                .collect()
+        fn harvesting(&self) -> CoordMap<Harvesting> {
+            let mut retour = self.previous.harvesting();
+            retour.remove(&self.current.coord);
+            if self.current.organe_type != OrganeType::Harvester {
+                return retour;
+            }
+            let en_face = self
+                .current
+                .coord
+                .decaler(self.current.direction)
+                .and_then(|c| self.get_coord(c));
+            if let Some(Cell {
+                coord: coord_prot,
+                entity: Entity::Protein(prot),
+            }) = en_face
+            {
+                retour.insert(
+                    coord_prot.clone(),
+                    Harvesting {
+                        protein: prot.clone(),
+                        direction: self.current.direction,
+                        harvester_coord: self.current.coord,
+                    },
+                );
+            };
+            retour
+        }
+
+        fn empty_cell(&self) -> CoordMap<EmptyCell> {
+            let mut retour = self.previous.empty_cell();
+            retour.remove(&self.current.coord);
+            retour
+        }
+
+        fn protein(&self) -> CoordMap<Protein> {
+            let mut retour = self.previous.protein();
+            retour.remove(&self.current.coord);
+            retour
+        }
+
+        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
+            let mut retour = self.previous.organes_amis();
+            retour.insert(
+                self.current.coord,
+                OrganeAmi {
+                    id: self.max_ami_id(),
+                },
+            );
+            retour
         }
     }
 
@@ -330,28 +399,41 @@ pub mod state {
             self.previous.planification().new_turn()
         }
 
-        fn get_coord(&self, coord: Coord) -> Option<&Cell> {
+        fn get_coord(&self, coord: Coord) -> Option<Cell> {
             self.previous.get_coord(coord)
         }
 
-        fn get_action_count(&self) -> ActionCount {
+        fn action_count(&self) -> ActionCount {
             ActionCount::default()
         }
 
-        fn iter_values(&self) -> Vec<&Cell> {
-            self.previous.iter_values()
+        fn max_ami_id(&self) -> Id {
+            self.previous.max_ami_id()
         }
 
-        fn get_max_ami_id(&self) -> Id {
-            self.previous.get_max_ami_id()
-        }
-
-        fn get_ami_ressource(&self) -> Ressource {
-            self.harvesting()
+        fn ressource_ami(&self) -> Ressource {
+            self.previous
+                .harvesting()
                 .into_iter()
-                .fold(self.previous.get_ami_ressource(), |res, prot| {
-                    res.ajout(prot)
+                .fold(self.previous.ressource_ami(), |res, (_c, harvesting)| {
+                    res.ajout(harvesting.protein)
                 })
+        }
+
+        fn harvesting(&self) -> CoordMap<Harvesting> {
+            self.previous.harvesting()
+        }
+
+        fn empty_cell(&self) -> CoordMap<EmptyCell> {
+            self.previous.empty_cell()
+        }
+
+        fn protein(&self) -> CoordMap<Protein> {
+            self.previous.protein()
+        }
+
+        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
+            self.previous.organes_amis()
         }
     }
 }
@@ -396,7 +478,32 @@ pub mod decision {
     }
 }
 
+pub mod molecule {
+    use super::atome::*;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Harvesting {
+        pub protein: Protein,
+        pub direction: Direction,
+        pub harvester_coord: Coord,
+    }
+
+    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+    pub struct OrganeAmi {
+        pub id: Id,
+    }
+
+    pub struct Fertilite {
+        pub parent_id: Id,
+    }
+
+    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    pub struct EmptyCell;
+}
+
 pub mod atome {
+    use std::collections::HashMap;
+
     use super::decision::Decision;
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -521,6 +628,7 @@ pub mod atome {
         Ennemy,
     }
 
+    pub type CoordMap<T> = HashMap<Coord, T>;
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub struct Coord {
         pub x: u16,

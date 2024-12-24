@@ -11,7 +11,7 @@ use criterion::Throughput;
 fn planif_bench(c: &mut Criterion) {
     let state = Rc::new(StateBuilder::new_a_gauche_prot_a_a_droite().build());
     let mut group = c.benchmark_group("planif1");
-    for size in 1..5usize {
+    for size in 1..7usize {
         group.throughput(Throughput::Bytes(size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
             b.iter(|| planifier(state.clone(), size));

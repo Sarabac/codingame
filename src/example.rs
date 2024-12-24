@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(unused)]
+
 use std::io;
 
 macro_rules! parse_input {
