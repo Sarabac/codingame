@@ -32,14 +32,15 @@ pub mod ai {
             states = realiser_tour(states)
                 .into_iter()
                 .map(|s| Rc::new(s) as Rc<dyn State>)
-                .map(|s|(s.clone(), juger(s)))
+                .map(|s| (s.clone(), juger(s)))
                 .sorted_by(|(_, a), (_, b)| b.cmp(&a))
                 .map(|(s, _)| s)
                 .take(80)
                 .collect();
         }
 
-        states.first()
+        states
+            .first()
             .map(|s| s.planification())
             .unwrap_or_default()
     }
@@ -49,18 +50,23 @@ pub mod ai {
         while !process.is_empty() {
             let (finis, encore) = process
                 .into_iter()
-                .flat_map(|s| {
-                    s.fertile_coords()
-                        .into_iter()
-                        .flat_map(|(coord, Fertilite { parent_id })| generer_grow(coord, parent_id))
-                        .filter_map(move |grow| GrowStep::try_new(s.clone(), grow))
-                })
-                .map(|s| Rc::new(s) as Rc<dyn State>)
+                .flat_map(generer_step)
                 .partition(|s| s.action_count().is_null());
             process = encore;
             retour.extend(finis.into_iter().map(EndTurn::new));
         }
         retour
+    }
+
+    fn generer_step(state: Rc<dyn State>) -> impl Iterator<Item = Rc<dyn State>> {
+        let wait_step = Rc::new(WaitStep::new(state.clone())) as Rc<dyn State>;
+        state
+            .fertile_coords()
+            .into_iter()
+            .flat_map(|(coord, Fertilite { parent_id })| generer_grow(coord, parent_id))
+            .filter_map(move |grow| GrowStep::try_new(state.clone(), grow))
+            .map(|s| Rc::new(s) as Rc<dyn State>)
+            .chain(std::iter::once(wait_step))
     }
 
     fn generer_grow(coord: Coord, parent_id: Id) -> impl Iterator<Item = Grow> {
@@ -136,7 +142,8 @@ pub mod state {
                                     parent_id: org_ami.id,
                                 },
                             )
-                        }).collect::<CoordMap<Fertilite>>()
+                        })
+                        .collect::<CoordMap<Fertilite>>()
                 })
                 .collect()
         }
@@ -246,13 +253,13 @@ pub mod state {
         fn get_coord(&self, coord: Coord) -> Option<Cell> {
             match self.coord_cells.get(&coord) {
                 Some(cell) => Some(cell.clone()),
-                None if coord.x < self.dimension.width && coord.y < self.dimension.height => {
-                    Some(Cell {
+                None => match self.empty_cells.get(&coord) {
+                    Some(_) => Some(Cell {
                         coord,
                         entity: Entity::Void,
-                    })
-                }
-                None => None,
+                    }),
+                    None => None,
+                },
             }
         }
 
@@ -270,6 +277,54 @@ pub mod state {
 
         fn organes_amis(&self) -> CoordMap<OrganeAmi> {
             self.organe_ami_cells.clone()
+        }
+    }
+
+    pub struct WaitStep {
+        previous: Rc<dyn State>,
+    }
+
+    impl WaitStep {
+        pub fn new(previous: Rc<dyn State>) -> Self {
+            Self { previous }
+        }
+    }
+
+    impl State for WaitStep {
+        fn planification(&self) -> Planification {
+            self.previous.planification().add_decision(Decision::Wait)
+        }
+
+        fn action_count(&self) -> ActionCount {
+            self.previous.action_count().decrement()
+        }
+
+        fn max_ami_id(&self) -> Id {
+            self.previous.max_ami_id()
+        }
+
+        fn ressource_ami(&self) -> Ressource {
+            self.previous.ressource_ami()
+        }
+
+        fn get_coord(&self, coord: Coord) -> Option<Cell> {
+            self.previous.get_coord(coord)
+        }
+
+        fn harvesting(&self) -> CoordMap<Harvesting> {
+            self.previous.harvesting()
+        }
+
+        fn empty_cell(&self) -> CoordMap<EmptyCell> {
+            self.previous.empty_cell()
+        }
+
+        fn protein(&self) -> CoordMap<Protein> {
+            self.previous.protein()
+        }
+
+        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
+            self.previous.organes_amis()
         }
     }
 
@@ -774,14 +829,8 @@ mod parsing {
         io::stdin().read_line(&mut buf).unwrap();
         let mut inputs = buf.split(" ").map(str::trim).map(str::parse);
         Dimension {
-            width: inputs
-                .next()
-                .expect("pas de width")
-                .unwrap_or(u8::MAX),
-            height: inputs
-                .next()
-                .expect("pas de height")
-                .unwrap_or(u8::MAX),
+            width: inputs.next().expect("pas de width").unwrap_or(u8::MAX),
+            height: inputs.next().expect("pas de height").unwrap_or(u8::MAX),
         }
     }
 
@@ -870,23 +919,11 @@ mod parsing {
         let mut buf = String::new();
         io::stdin().read_line(&mut buf).unwrap();
         let mut inputs = buf.split(" ").map(str::trim).map(str::parse);
-        let a = inputs
-            .next()
-            .expect("pas de proteine A")
-            .unwrap_or(u8::MAX);
+        let a = inputs.next().expect("pas de proteine A").unwrap_or(u8::MAX);
 
-        let b = inputs
-            .next()
-            .expect("pas de proteine B")
-            .unwrap_or(u8::MAX);
-        let c = inputs
-            .next()
-            .expect("pas de proteine C")
-            .unwrap_or(u8::MAX);
-        let d = inputs
-            .next()
-            .expect("pas de proteine D")
-            .unwrap_or(u8::MAX);
+        let b = inputs.next().expect("pas de proteine B").unwrap_or(u8::MAX);
+        let c = inputs.next().expect("pas de proteine C").unwrap_or(u8::MAX);
+        let d = inputs.next().expect("pas de proteine D").unwrap_or(u8::MAX);
         Ressource::new(a, b, c, d)
     }
 
