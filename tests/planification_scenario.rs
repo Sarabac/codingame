@@ -2,6 +2,7 @@ use std::rc::Rc;
 
 use codingame::common::*;
 use codingame::ligue1::{ai::*, atome::*, decision::*};
+use rand::SeedableRng;
 
 /**
  * -----------
@@ -19,7 +20,10 @@ use codingame::ligue1::{ai::*, atome::*, decision::*};
 #[test]
 fn va_harvester() {
     let state = Rc::new(StateBuilder::new_a_gauche_prot_a_a_droite().build());
-    let plan = planifier(state, 3);
+    let mut managing = Managing::new()
+        .with_rng(rand::rngs::StdRng::seed_from_u64(81))
+        .with_nb_max_iteration(3);
+    let plan = planifier(state, &mut managing);
     let grow1 = Grow {
         coord: Coord { x: 1, y: 2 },
         direction: Direction::N,

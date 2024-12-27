@@ -1,6 +1,7 @@
 use std::{collections::HashMap, rc::Rc};
 
 use codingame::ligue1::{ai::*, atome::*, decision::*, molecule::*, state::*};
+use rand::SeedableRng;
 
 #[test]
 fn count_harvesting() {
@@ -95,7 +96,10 @@ fn harvesting_is_best() {
         action_count,
         cells,
     );
-    let decision = planifier(Rc::new(state), 1)
+    let mut managing = Managing::new()
+        .with_rng(rand::rngs::StdRng::seed_from_u64(57))
+        .with_nb_max_iteration(1);
+    let decision = planifier(Rc::new(state), &mut managing)
         .take_first_turn()
         .into_iter()
         .next()
@@ -142,7 +146,10 @@ fn no_harvesting_when_no_prot() {
         action_count,
         cells,
     );
-    let decision = planifier(Rc::new(state), 1)
+    let mut managing = Managing::new()
+        .with_rng(rand::rngs::StdRng::seed_from_u64(62))
+        .with_nb_max_iteration(1);
+    let decision = planifier(Rc::new(state), &mut managing)
         .take_first_turn()
         .into_iter()
         .next()

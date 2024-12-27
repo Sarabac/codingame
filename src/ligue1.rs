@@ -1,47 +1,65 @@
-use ai::make_decision;
+use ai::{make_decision, Managing};
 use parsing::{parser_dimension, parser_tour};
+use rand::prelude::*;
 
 pub fn main() {
     let dimension = parser_dimension();
+    let mut managing = Managing::new().with_rng(rand::rngs::StdRng::seed_from_u64(33));
     loop {
+        managing.restart();
         let game_state = parser_tour(dimension);
         eprintln!("Game State: {}", &game_state);
-        let decision = make_decision(game_state);
+        let decision = make_decision(game_state, &mut managing);
         println!("{}", decision.to_string());
+        managing.next_turn();
     }
 }
 
 pub mod ai {
-    use std::rc::Rc;
+    use rand::prelude::*;
+    use std::{
+        i32,
+        ops::{Range, Sub},
+        rc::Rc,
+        time::{Duration, Instant},
+    };
 
-    use itertools::{iproduct, Itertools};
+    use itertools::iproduct;
 
-    use super::{atome::*, decision::*, molecule::Fertilite, state::*};
+    use super::{atome::*, decision::*, molecule::*, state::*};
 
-    pub fn make_decision(state: InitState) -> Decision {
-        planifier(Rc::new(state), 2)
+    pub fn make_decision(state: InitState, managing: &mut Managing) -> Decision {
+        planifier(Rc::new(state), managing)
             .take_first_turn()
             .into_iter()
             .next()
             .unwrap_or_default()
     }
 
-    pub fn planifier(state: Rc<dyn State>, rec: usize) -> Planification {
-        let mut states = vec![state];
-        for _i in 0..rec {
-            states = realiser_tour(states)
+    pub fn planifier(state: Rc<dyn State>, managing: &mut Managing) -> Planification {
+        let mut states: Vec<WeightedState> = vec![WeightedState { state, weight: 1 }];
+        for _i in managing.iterations() {
+            let nouveau_tour = states.into_iter().map(|w| w.state).collect();
+            let intermediaire: Vec<WeightedState> = realiser_tour(nouveau_tour)
                 .into_iter()
                 .map(|s| Rc::new(s) as Rc<dyn State>)
-                .map(|s| (s.clone(), juger(s)))
-                .sorted_by(|(_, a), (_, b)| b.cmp(&a))
-                .map(|(s, _)| s)
-                .take(50)
+                .map(|s| juger(s))
                 .collect();
+            let nb_to_choose = managing.nb_to_choose();
+            states = intermediaire
+                .choose_multiple_weighted(managing.rng(), nb_to_choose, |w| w.weight)
+                .expect("Erreur dans le choose")
+                .cloned()
+                .collect();
+
+            if managing.is_finished() {
+                break;
+            };
         }
 
         states
-            .first()
-            .map(|s| s.planification())
+            .choose_weighted(managing.rng(), |w| w.weight)
+            .map(|s| s.state.planification())
             .unwrap_or_default()
     }
 
@@ -70,17 +88,23 @@ pub mod ai {
     }
 
     fn generer_grow(coord: Coord, parent_id: Id) -> impl Iterator<Item = Grow> {
-        iproduct!([OrganeType::Basic, OrganeType::Harvester, OrganeType::Tentacle], Direction::all()).map(
-            move |(organe_type, direction)| Grow {
-                parent_id,
-                coord,
-                organe_type,
-                direction,
-            },
+        iproduct!(
+            [
+                OrganeType::Basic,
+                OrganeType::Harvester,
+                OrganeType::Tentacle
+            ],
+            Direction::all()
         )
+        .map(move |(organe_type, direction)| Grow {
+            parent_id,
+            coord,
+            organe_type,
+            direction,
+        })
     }
 
-    pub fn juger(state: Rc<dyn State>) -> usize {
+    pub fn juger(state: Rc<dyn State>) -> WeightedState {
         let nb_harvesting = state.harvesting().len();
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
@@ -92,7 +116,87 @@ pub mod ai {
         let nb_ami = state.organes_amis().len() * 3;
         let nb_ennemi = state.organe_ennemy_location().len() * 3;
 
-        return 1 + note_nb_harvesting + note_resources + nb_ami - nb_ennemi;
+        let weight = i32::try_from(1 + note_nb_harvesting + note_resources + nb_ami)
+            .unwrap_or(i32::MAX)
+            .saturating_sub(i32::try_from(nb_ennemi).unwrap_or(i32::MAX));
+        WeightedState { state, weight }
+    }
+
+    #[derive(Debug, Clone)]
+    pub struct WeightedState {
+        pub state: Rc<dyn State>,
+        pub weight: i32,
+    }
+
+    pub struct Managing {
+        debut: Instant,
+        permier_tour_duree: Duration,
+        tours_suivant_duree: Duration,
+        end_offset: Duration,
+        nb_max_iteration: u8,
+        tour_nb: u8,
+        rng: StdRng,
+        nb_to_choose: usize,
+    }
+
+    impl Managing {
+        pub fn new() -> Self {
+            Managing {
+                debut: Instant::now(),
+                permier_tour_duree: Duration::from_millis(1000),
+                tours_suivant_duree: Duration::from_millis(50),
+                end_offset: Duration::from_millis(5),
+                nb_max_iteration: 100,
+                tour_nb: 0,
+                rng: rand::rngs::StdRng::seed_from_u64(81),
+                nb_to_choose: 150,
+            }
+        }
+
+        pub fn with_rng(mut self, rng: StdRng) -> Self {
+            self.rng = rng;
+            self
+        }
+
+        pub fn with_nb_max_iteration(mut self, nb: u8) -> Self {
+            self.nb_max_iteration = nb;
+            self
+        }
+
+        pub fn with_nb_to_choose(mut self, nb: usize) -> Self {
+            self.nb_to_choose = nb;
+            self
+        }
+
+        pub fn restart(&mut self) {
+            self.debut = Instant::now();
+        }
+
+        pub fn iterations(&self) -> Range<u8> {
+            0..(self.nb_max_iteration)
+        }
+
+        pub fn is_finished(&self) -> bool {
+            let duree_max = match self.tour_nb {
+                0 => self.permier_tour_duree,
+                _ => self.tours_suivant_duree,
+            }
+            .sub(self.end_offset);
+            let delta = self.debut.elapsed();
+            delta > duree_max
+        }
+
+        pub fn rng(&mut self) -> &mut StdRng {
+            &mut self.rng
+        }
+
+        pub fn nb_to_choose(&self) -> usize {
+            self.nb_to_choose
+        }
+
+        pub fn next_turn(&mut self) {
+            self.tour_nb = self.tour_nb.saturating_add(1);
+        }
     }
 }
 
@@ -107,7 +211,7 @@ pub mod state {
 
     use super::{atome::*, decision::*, molecule::*};
 
-    pub trait State {
+    pub trait State: Debug {
         fn planification(&self) -> Planification;
         fn action_count(&self) -> ActionCount;
         fn max_ami_id(&self) -> Id;
@@ -130,9 +234,7 @@ pub mod state {
         }
 
         fn en_face(&self, coord: Coord, direction: Direction) -> Option<Cell> {
-            coord
-                .decaler(direction)
-                .and_then(|c| self.get_coord(c))
+            coord.decaler(direction).and_then(|c| self.get_coord(c))
         }
 
         fn fertile_coords(&self) -> CoordMap<Fertilite> {
@@ -175,7 +277,7 @@ pub mod state {
         harvesting_cells: CoordMap<Harvesting>,
 
         organe_ennemy_relation_map: IdMap<HashSet<Id>>,
-        organe_ennemy_location_by_id_map: IdMap<Coord> 
+        organe_ennemy_location_by_id_map: IdMap<Coord>,
     }
 
     impl InitState {
@@ -209,7 +311,10 @@ pub mod state {
                     }
                     Entity::Organe(org) if org.owner == Owner::Ennemy => {
                         if org.id != org.parent_id {
-                            organe_ennemy_relation_map.entry(org.parent_id).or_default().insert(org.id);
+                            organe_ennemy_relation_map
+                                .entry(org.parent_id)
+                                .or_default()
+                                .insert(org.id);
                         };
                         organe_ennemy_location_by_id_map.insert(org.id, coord);
                     }
@@ -302,20 +407,21 @@ pub mod state {
         fn organes_amis(&self) -> CoordMap<OrganeAmi> {
             self.organe_ami_cells.clone()
         }
-        
+
         fn attacking(&self) -> CoordMap<Attacking> {
             CoordMap::new()
         }
-        
+
         fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
             self.organe_ennemy_relation_map.clone()
         }
-        
+
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
             self.organe_ennemy_location_by_id_map.clone()
         }
     }
 
+    #[derive(Debug)]
     pub struct WaitStep {
         previous: Rc<dyn State>,
     }
@@ -362,20 +468,21 @@ pub mod state {
         fn organes_amis(&self) -> CoordMap<OrganeAmi> {
             self.previous.organes_amis()
         }
-        
+
         fn attacking(&self) -> CoordMap<Attacking> {
             self.previous.attacking()
         }
-        
+
         fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
             self.previous.organe_ennemy_childs()
         }
-        
-        fn organe_ennemy_location(&self) -> IdMap<Coord>{
+
+        fn organe_ennemy_location(&self) -> IdMap<Coord> {
             self.previous.organe_ennemy_location()
         }
     }
 
+    #[derive(Debug)]
     pub struct GrowStep {
         previous: Rc<dyn State>,
         current: Grow,
@@ -442,7 +549,7 @@ pub mod state {
                 return retour;
             }
             let en_face = self.en_face(self.current.coord, self.current.direction);
-            
+
             if let Some(Cell {
                 coord: coord_prot,
                 entity: Entity::Protein(prot),
@@ -482,7 +589,7 @@ pub mod state {
             );
             retour
         }
-        
+
         fn attacking(&self) -> CoordMap<Attacking> {
             let mut previous_attacking = self.previous.attacking();
             if self.current.organe_type == OrganeType::Tentacle {
@@ -493,32 +600,48 @@ pub mod state {
                     return previous_attacking;
                 };
                 if org.owner == Owner::Ennemy {
-                    previous_attacking.insert(self.current.coord, Attacking { target_coord: en_face.coord, target_id: org.id });
+                    previous_attacking.insert(
+                        self.current.coord,
+                        Attacking {
+                            target_coord: en_face.coord,
+                            target_id: org.id,
+                        },
+                    );
                 };
             };
             previous_attacking
         }
-        
+
         fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
             self.previous.organe_ennemy_childs()
         }
-        
-        fn organe_ennemy_location(&self) -> IdMap<Coord>{
+
+        fn organe_ennemy_location(&self) -> IdMap<Coord> {
             self.previous.organe_ennemy_location()
         }
     }
 
+    #[derive(Debug)]
     pub struct EndTurn {
         previous: Rc<dyn State>,
         detruit_coord: HashSet<Coord>,
-        detruit_id: HashSet<Id>
+        detruit_id: HashSet<Id>,
     }
 
-    fn get_childs_recursive(organe_ennemy_childs: &IdMap<HashSet<Id>>, organe_ennemy_location: &IdMap<Coord>, parent_id: Id) -> (HashSet<Id>, HashSet<Coord>) {
+    fn get_childs_recursive(
+        organe_ennemy_childs: &IdMap<HashSet<Id>>,
+        organe_ennemy_location: &IdMap<Coord>,
+        parent_id: Id,
+    ) -> (HashSet<Id>, HashSet<Coord>) {
         let mut coords: HashSet<Coord> = HashSet::new();
         let mut ids: HashSet<Id> = HashSet::new();
-        for child in organe_ennemy_childs.get(&parent_id).cloned().unwrap_or_default() {
-            let (next_ids, next_coords) = get_childs_recursive(organe_ennemy_childs, organe_ennemy_location, child);
+        for child in organe_ennemy_childs
+            .get(&parent_id)
+            .cloned()
+            .unwrap_or_default()
+        {
+            let (next_ids, next_coords) =
+                get_childs_recursive(organe_ennemy_childs, organe_ennemy_location, child);
             ids.insert(child);
             if let Some(coord) = organe_ennemy_location.get(&child).cloned() {
                 coords.insert(coord);
@@ -536,11 +659,19 @@ pub mod state {
             let organe_ennemy_childs_map = state.organe_ennemy_childs();
             let organe_ennemy_location_map = state.organe_ennemy_location();
             for attacked in state.attacking().into_values() {
-                let (ids, coords) = get_childs_recursive(&organe_ennemy_childs_map, &organe_ennemy_location_map, attacked.target_id);
+                let (ids, coords) = get_childs_recursive(
+                    &organe_ennemy_childs_map,
+                    &organe_ennemy_location_map,
+                    attacked.target_id,
+                );
                 detruit_coord = detruit_coord.union(&coords).cloned().collect();
                 detruit_id = detruit_id.union(&ids).cloned().collect();
             }
-            Self { previous: state, detruit_coord, detruit_id }
+            Self {
+                previous: state,
+                detruit_coord,
+                detruit_id,
+            }
         }
     }
 
@@ -551,7 +682,10 @@ pub mod state {
 
         fn get_coord(&self, coord: Coord) -> Option<Cell> {
             if self.detruit_coord.contains(&coord) {
-                return Some(Cell {coord, entity: Entity::Void});
+                return Some(Cell {
+                    coord,
+                    entity: Entity::Void,
+                });
             }
             self.previous.get_coord(coord)
         }
@@ -590,11 +724,11 @@ pub mod state {
         fn organes_amis(&self) -> CoordMap<OrganeAmi> {
             self.previous.organes_amis()
         }
-        
+
         fn attacking(&self) -> CoordMap<Attacking> {
             CoordMap::new()
         }
-        
+
         fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
             let mut childs = self.previous.organe_ennemy_childs();
             childs.retain(|key, value| {
@@ -603,7 +737,7 @@ pub mod state {
             });
             childs
         }
-        
+
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
             let mut locations = self.previous.organe_ennemy_location();
             locations.retain(|_key, value| !self.detruit_coord.contains(value));
@@ -658,7 +792,7 @@ pub mod molecule {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Attacking {
         pub target_coord: Coord,
-        pub target_id: Id
+        pub target_id: Id,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -731,7 +865,7 @@ pub mod atome {
         Root,
         Basic,
         Harvester,
-        Tentacle
+        Tentacle,
     }
     impl OrganeType {
         pub fn prix(&self) -> Ressource {
@@ -739,7 +873,7 @@ pub mod atome {
                 OrganeType::Root => Ressource::default(),
                 OrganeType::Basic => Ressource::new(1, 0, 0, 0),
                 OrganeType::Harvester => Ressource::new(0, 0, 1, 1),
-                OrganeType::Tentacle => Ressource::new(0, 1, 1, 0)
+                OrganeType::Tentacle => Ressource::new(0, 1, 1, 0),
             }
         }
     }
@@ -749,7 +883,7 @@ pub mod atome {
                 OrganeType::Basic => "BASIC",
                 OrganeType::Root => "ROOT",
                 OrganeType::Harvester => "HARVESTER",
-                OrganeType::Tentacle => "TENTACLE"
+                OrganeType::Tentacle => "TENTACLE",
             }
             .into()
         }
