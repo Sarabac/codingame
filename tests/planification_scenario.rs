@@ -91,13 +91,13 @@ fn va_attaquer(rng: u64) -> Result<(), Box<dyn Debug>> {
     // GIVEN
     let friend = OrganismBuilder::default().build(Owner::Me, Coord { x: 0, y: 1 });
     let ennemy = OrganismBuilder::default()
-    .add_basic(Direction::E)
-    .add_basic(Direction::E)
-    .add_basic(Direction::N)
-    .add_basic(Direction::N)
-    .add_basic(Direction::W)
-    .add_basic(Direction::W)
-    .build(Owner::Ennemy, Coord { x: 0, y: 2 });
+        .add_basic(Direction::E)
+        .add_basic(Direction::E)
+        .add_basic(Direction::N)
+        .add_basic(Direction::N)
+        .add_basic(Direction::W)
+        .add_basic(Direction::W)
+        .build(Owner::Ennemy, Coord { x: 0, y: 2 });
     let builder = StateBuilder::new_carre_vide_3()
         .with_ressources_ami(Ressource::new(50, 1, 1, 0))
         .add_cells(friend)
@@ -117,7 +117,7 @@ fn va_attaquer(rng: u64) -> Result<(), Box<dyn Debug>> {
             GrowChecker::default()
                 .coord(Coord { x: 1, y: 1 })
                 .direction(Direction::S)
-                .organ_type(OrganeType::Tentacle)
+                .organ_type(OrganeType::Tentacle),
         )
         .then_grow(GrowChecker::default().organ_type(OrganeType::Basic))
         .then_grow(GrowChecker::default().organ_type(OrganeType::Basic))

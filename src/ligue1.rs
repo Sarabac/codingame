@@ -18,7 +18,6 @@ pub fn main() {
 pub mod ai {
     use rand::prelude::*;
     use std::{
-        i32,
         ops::{Range, Sub},
         rc::Rc,
         time::{Duration, Instant},
@@ -92,7 +91,8 @@ pub mod ai {
             [
                 OrganeType::Basic,
                 OrganeType::Harvester,
-                OrganeType::Tentacle
+                OrganeType::Tentacle,
+                OrganeType::Sporer
             ],
             Direction::all()
         )
@@ -884,6 +884,7 @@ pub mod atome {
         Basic,
         Harvester,
         Tentacle,
+        Sporer,
     }
     impl OrganeType {
         pub fn prix(&self) -> Ressource {
@@ -892,6 +893,7 @@ pub mod atome {
                 OrganeType::Basic => Ressource::new(1, 0, 0, 0),
                 OrganeType::Harvester => Ressource::new(0, 0, 1, 1),
                 OrganeType::Tentacle => Ressource::new(0, 1, 1, 0),
+                OrganeType::Sporer => Ressource::new(0, 1, 0, 1),
             }
         }
     }
@@ -902,6 +904,7 @@ pub mod atome {
                 OrganeType::Root => "ROOT",
                 OrganeType::Harvester => "HARVESTER",
                 OrganeType::Tentacle => "TENTACLE",
+                OrganeType::Sporer => "SPORER",
             }
             .into()
         }
@@ -1183,6 +1186,7 @@ mod parsing {
                     "BASIC" => OrganeType::Basic,
                     "HARVESTER" => OrganeType::Harvester,
                     "TENTACLE" => OrganeType::Tentacle,
+                    "SPORER" => OrganeType::Sporer,
                     _ => panic!("pas d'organe type valide: {organ_type_str}"),
                 };
                 Entity::Organe(Organe {
