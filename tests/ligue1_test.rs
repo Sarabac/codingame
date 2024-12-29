@@ -69,7 +69,7 @@ fn no_harvesting_when_no_prot() {
         height: 3,
         width: 3,
     };
-    let ressources_ami = Ressource::new(1, 1, 1, 1);
+    let ressources_ami = Ressource::new(1, 0, 0, 1);
     let ressources_ennemy = Ressource::new(1, 1, 1, 1);
     let action_count = ActionCount::new(1);
     let cells = vec![
@@ -126,7 +126,7 @@ fn bonnes_dimensions() {
 
     let coo1 = Coord { x: 3, y: 1 };
     assert_eq!(
-        state.get_coord(coo1),
+        state.get_by_coord(coo1),
         Some(Cell {
             coord: coo1,
             entity: Entity::Void
@@ -134,5 +134,5 @@ fn bonnes_dimensions() {
     );
 
     let coo2 = Coord { x: 1, y: 3 };
-    assert_eq!(state.get_coord(coo2), None);
+    assert_eq!(state.get_by_coord(coo2), None);
 }

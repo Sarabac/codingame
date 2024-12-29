@@ -5,7 +5,10 @@ use codingame::{
     ligue1::{ai::*, atome::*},
 };
 use rand::SeedableRng;
-use verification::{random_testing::{random_testing, RandomTestingResult}, GrowChecker, PlanificationChecker};
+use verification::{
+    random_testing::{random_testing, RandomTestingResult},
+    GrowChecker, PlanificationChecker,
+};
 
 fn creer_sporer_quand_seule_ressource_dispo(rng: u64) -> Result<(), Box<dyn Debug>> {
     let builder = StateBuilder::new_ligne_de_3_root_a_gauche()

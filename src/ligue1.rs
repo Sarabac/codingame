@@ -1,4 +1,5 @@
 use ai::{make_decision, Managing};
+use atome::ToCommand;
 use parsing::{parser_dimension, parser_tour};
 use rand::prelude::*;
 
@@ -9,8 +10,10 @@ pub fn main() {
         managing.restart();
         let game_state = parser_tour(dimension);
         eprintln!("Game State: {}", &game_state);
-        let decision = make_decision(game_state, &mut managing);
-        println!("{}", decision.to_string());
+        let decisions = make_decision(game_state, &mut managing);
+        for decision in decisions {
+            println!("{}", decision.to_command());
+        }
         managing.next_turn();
     }
 }
@@ -27,12 +30,16 @@ pub mod ai {
 
     use super::{atome::*, decision::*, molecule::*, state::*};
 
-    pub fn make_decision(state: InitState, managing: &mut Managing) -> Decision {
-        planifier(Rc::new(state), managing)
+    pub fn make_decision(state: InitState, managing: &mut Managing) -> Vec<Decision> {
+        let state_pointer = Rc::new(state);
+        let mut planification_iter = planifier(state_pointer.clone(), managing)
             .take_first_turn()
-            .into_iter()
-            .next()
-            .unwrap_or_default()
+            .into_iter();
+        let mut decisions: Vec<Decision> = Vec::new();
+        for _ in state_pointer.get_action_count() {
+            decisions.push(planification_iter.next().unwrap_or(Decision::Wait));
+        }
+        decisions
     }
 
     pub fn planifier(state: Rc<dyn State>, managing: &mut Managing) -> Planification {
@@ -67,16 +74,17 @@ pub mod ai {
         while !process.is_empty() {
             let (finis, encore) = process
                 .into_iter()
-                .flat_map(generer_step)
-                .partition(|s| s.action_count().is_null());
+                .filter_map(|s|Some((s.clone(), s.action_set().get(Owner::Me).iter().next().cloned()?)))
+                .flat_map(|(s, root_id)| generer_step(s, root_id))
+                .partition(|s| s.action_set().get(Owner::Me).is_empty());
             process = encore;
             retour.extend(finis.into_iter().map(EndTurn::new));
         }
         retour
     }
 
-    fn generer_step(state: Rc<dyn State>) -> impl Iterator<Item = Rc<dyn State>> {
-        let wait_step = Rc::new(WaitStep::new(state.clone())) as Rc<dyn State>;
+    fn generer_step(state: Rc<dyn State>, root_id: Id) -> impl Iterator<Item = Rc<dyn State>> {
+        let wait_step = Rc::new(WaitStep::new(state.clone(), Wait { root_id })) as Rc<dyn State>;
         state
             .fertile_coords()
             .into_iter()
@@ -231,11 +239,13 @@ pub mod state {
 
     pub trait State: Debug {
         fn planification(&self) -> Planification;
-        fn action_count(&self) -> ActionCount;
-        fn max_ami_id(&self) -> Id;
+        fn action_set(&self) -> OwnerMap<HashSet<Id>>;
+        fn max_id(&self) -> OwnerMap<Id>;
         fn ressource_ami(&self) -> Ressource;
-        fn get_coord(&self, coord: Coord) -> Option<Cell>;
+        fn get_by_coord(&self, coord: Coord) -> Option<Cell>;
+        fn get_by_id(&self, id: Id) -> Option<OrgWithCoord>;
 
+        fn roots(&self) -> OwnerMap<HashSet<Id>>;
         fn attacking(&self) -> CoordMap<Attacking>;
         fn harvesting(&self) -> CoordMap<Harvesting>;
         fn empty_cell(&self) -> CoordMap<EmptyCell>;
@@ -248,11 +258,11 @@ pub mod state {
         fn get_neighbour(&self, coor: Coord) -> [Option<Cell>; 4] {
             Direction::all()
                 .map(|direction| coor.decaler(direction.clone()))
-                .map(|co| self.get_coord(co?))
+                .map(|co| self.get_by_coord(co?))
         }
 
         fn en_face(&self, coord: Coord, direction: Direction) -> Option<Cell> {
-            coord.decaler(direction).and_then(|c| self.get_coord(c))
+            coord.decaler(direction).and_then(|c| self.get_by_coord(c))
         }
 
         fn fertile_coords(&self) -> CoordMap<Fertilite> {
@@ -285,10 +295,12 @@ pub mod state {
         dimension: Dimension,
         ressources_ami: Ressource,
         ressources_ennemy: Ressource,
+        root_set: OwnerMap<HashSet<Id>>,
         action_count: ActionCount,
-        max_ami_id: Id,
+        max_id: OwnerMap<Id>,
 
         coord_cells: CoordMap<Cell>,
+        id_map: IdMap<OrgWithCoord>,
         empty_cells: CoordMap<EmptyCell>,
         prot_cells: CoordMap<Protein>,
         organe_ami_cells: CoordMap<OrganeAmi>,
@@ -306,8 +318,10 @@ pub mod state {
             action_count: ActionCount,
             cells: Vec<Cell>,
         ) -> Self {
-            let mut max_ami_id = Id::default();
+            let mut max_id: OwnerMap<Id> = OwnerMap::default();
+            let mut root_set: OwnerMap<HashSet<Id>> = OwnerMap::default();
             let coord_cells: CoordMap<Cell> = cells.iter().map(|c| (c.coord, c.clone())).collect();
+            let mut id_map: IdMap<OrgWithCoord> = HashMap::new();
             let mut prot_cells: CoordMap<Protein> = HashMap::new();
             let mut empty_cells: CoordMap<EmptyCell> =
                 iproduct!(0..dimension.width, 0..dimension.height)
@@ -327,36 +341,59 @@ pub mod state {
                     Entity::Protein(prot) => {
                         prot_cells.insert(coord, prot);
                     }
-                    Entity::Organe(org) if org.owner == Owner::Ennemy => {
-                        if org.id != org.parent_id {
-                            organe_ennemy_relation_map
-                                .entry(org.parent_id)
-                                .or_default()
-                                .insert(org.id);
-                        };
-                        organe_ennemy_location_by_id_map.insert(org.id, coord);
-                    }
                     Entity::Organe(org) => {
-                        max_ami_id = max_ami_id.max(org.id);
-                        organe_ami_cells.insert(coord, OrganeAmi { id: org.id });
+                        max_id = max_id.insert_max(org.id);
+                        id_map.insert(
+                            org.id,
+                            OrgWithCoord {
+                                coord,
+                                id: org.id,
+                                parent_id: org.parent_id,
+                                root_id: org.root_id,
+                                org_type: org.organe_type,
+                            },
+                        );
 
-                        if org.organe_type == OrganeType::Harvester {
-                            let en_face =
-                                coord.decaler(org.dir).and_then(|coo| coord_cells.get(&coo));
-                            if let Some(Cell {
-                                coord: coord_prot,
-                                entity: Entity::Protein(prot),
-                            }) = en_face
-                            {
-                                harvesting_cells.insert(
-                                    coord_prot.clone(),
-                                    Harvesting {
-                                        protein: prot.clone(),
-                                        direction: org.dir,
-                                        harvester_coord: coord,
-                                    },
-                                );
-                            };
+                        if org.organe_type == OrganeType::Root {
+                            root_set = root_set.update(org.owner, |mut ids| {
+                                ids.insert(org.id);
+                                ids
+                            })
+                        }
+
+                        match org.owner {
+                            Owner::Ennemy => {
+                                if org.id != org.parent_id {
+                                    organe_ennemy_relation_map
+                                        .entry(org.parent_id)
+                                        .or_default()
+                                        .insert(org.id);
+                                };
+                                organe_ennemy_location_by_id_map.insert(org.id, coord);
+                            }
+                            Owner::Me => {
+                                organe_ami_cells.insert(coord, OrganeAmi { id: org.id });
+
+                                if org.organe_type == OrganeType::Harvester {
+                                    let en_face = coord
+                                        .decaler(org.dir)
+                                        .and_then(|coo| coord_cells.get(&coo));
+                                    if let Some(Cell {
+                                        coord: coord_prot,
+                                        entity: Entity::Protein(prot),
+                                    }) = en_face
+                                    {
+                                        harvesting_cells.insert(
+                                            coord_prot.clone(),
+                                            Harvesting {
+                                                protein: prot.clone(),
+                                                direction: org.dir,
+                                                harvester_coord: coord,
+                                            },
+                                        );
+                                    };
+                                }
+                            }
                         }
                     }
                 };
@@ -365,9 +402,11 @@ pub mod state {
                 dimension,
                 ressources_ami,
                 ressources_ennemy,
-                action_count,
+                root_set,
                 coord_cells,
-                max_ami_id,
+                id_map,
+                max_id,
+                action_count,
                 empty_cells,
                 prot_cells,
                 organe_ami_cells,
@@ -375,6 +414,10 @@ pub mod state {
                 organe_ennemy_relation_map,
                 organe_ennemy_location_by_id_map,
             }
+        }
+
+        pub fn get_action_count(&self) -> ActionCount {
+            self.action_count
         }
     }
 
@@ -388,16 +431,14 @@ pub mod state {
         fn planification(&self) -> Planification {
             Planification::default()
         }
-        fn action_count(&self) -> ActionCount {
-            self.action_count
-        }
-        fn max_ami_id(&self) -> Id {
-            self.max_ami_id
+
+        fn max_id(&self) -> OwnerMap<Id> {
+            self.max_id
         }
         fn ressource_ami(&self) -> Ressource {
             self.ressources_ami
         }
-        fn get_coord(&self, coord: Coord) -> Option<Cell> {
+        fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
             match self.coord_cells.get(&coord) {
                 Some(cell) => Some(cell.clone()),
                 None => match self.empty_cells.get(&coord) {
@@ -437,16 +478,35 @@ pub mod state {
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
             self.organe_ennemy_location_by_id_map.clone()
         }
+
+        fn action_set(&self) -> OwnerMap<HashSet<Id>> {
+            self.root_set.clone()
+        }
+
+        fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
+            self.id_map.get(&id).copied()
+        }
+
+        fn roots(&self) -> OwnerMap<HashSet<Id>> {
+            self.root_set.clone()
+        }
     }
 
     #[derive(Debug)]
     pub struct WaitStep {
         previous: Rc<dyn State>,
+        decision: Wait,
     }
 
     impl WaitStep {
-        pub fn new(previous: Rc<dyn State>) -> Self {
-            Self { previous }
+        pub fn new(previous: Rc<dyn State>, decision: Wait) -> Self {
+            Self { previous, decision }
+        }
+    }
+
+    impl HaveRoot for WaitStep {
+        fn get_root_id(&self) -> Id {
+            self.decision.root_id
         }
     }
 
@@ -455,20 +515,16 @@ pub mod state {
             self.previous.planification().add_decision(Decision::Wait)
         }
 
-        fn action_count(&self) -> ActionCount {
-            self.previous.action_count().decrement()
-        }
-
-        fn max_ami_id(&self) -> Id {
-            self.previous.max_ami_id()
+        fn max_id(&self) -> OwnerMap<Id> {
+            self.previous.max_id()
         }
 
         fn ressource_ami(&self) -> Ressource {
             self.previous.ressource_ami()
         }
 
-        fn get_coord(&self, coord: Coord) -> Option<Cell> {
-            self.previous.get_coord(coord)
+        fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
+            self.previous.get_by_coord(coord)
         }
 
         fn harvesting(&self) -> CoordMap<Harvesting> {
@@ -498,28 +554,54 @@ pub mod state {
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
             self.previous.organe_ennemy_location()
         }
+
+        fn action_set(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous
+                .action_set()
+                .update(self.get_owner(), |mut ids| {
+                    ids.remove(&self.get_root_id());
+                    ids
+                })
+        }
+
+        fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
+            self.previous.get_by_id(id)
+        }
+
+        fn roots(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous.roots()
+        }
     }
 
     #[derive(Debug)]
     pub struct GrowStep {
         previous: Rc<dyn State>,
-        current: Grow,
+        decision: Grow,
         ami_ressource: Ressource,
     }
 
     impl GrowStep {
-        pub fn try_new(previous: Rc<dyn State>, current: Grow) -> Option<Self> {
+        pub fn try_new(previous: Rc<dyn State>, decision: Grow) -> Option<Self> {
             let mut ami_ressource = previous
                 .ressource_ami()
-                .checked_sub(current.organe_type.prix())?;
-            if let Some(prot) = previous.protein().get(&current.coord) {
+                .checked_sub(decision.organe_type.prix())?;
+            if let Some(prot) = previous.protein().get(&decision.coord) {
                 ami_ressource = ami_ressource.ajout(prot.clone());
             };
             Some(Self {
                 previous,
-                current,
+                decision,
                 ami_ressource,
             })
+        }
+    }
+
+    impl HaveRoot for GrowStep {
+        fn get_root_id(&self) -> Id {
+            self.previous
+                .get_by_id(self.decision.parent_id)
+                .map(|org| org.root_id)
+                .expect("pas de parent existant")
         }
     }
 
@@ -527,46 +609,56 @@ pub mod state {
         fn planification(&self) -> Planification {
             self.previous
                 .planification()
-                .add_decision(Decision::Grow(self.current))
+                .add_decision(Decision::Grow(self.decision))
         }
 
-        fn action_count(&self) -> ActionCount {
-            self.previous.action_count().decrement()
-        }
-
-        fn max_ami_id(&self) -> Id {
-            self.previous.max_ami_id().increment()
+        fn max_id(&self) -> OwnerMap<Id> {
+            self.previous.max_id().increment(self.get_owner())
         }
 
         fn ressource_ami(&self) -> Ressource {
             self.ami_ressource
         }
 
-        fn get_coord(&self, coord: Coord) -> Option<Cell> {
-            if self.current.coord == coord {
+        fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
+            if self.decision.coord == coord {
                 Some(Cell {
-                    coord: self.current.coord,
+                    coord: self.decision.coord,
                     entity: Entity::Organe(Organe {
-                        id: self.max_ami_id(),
-                        parent_id: self.current.parent_id,
-                        root_id: Id::default(),
-                        organe_type: self.current.organe_type,
-                        dir: self.current.direction,
-                        owner: Owner::Me,
+                        id: self.max_id().get(self.get_owner()).clone(),
+                        parent_id: self.decision.parent_id,
+                        root_id: self.get_root_id(),
+                        organe_type: self.decision.organe_type,
+                        dir: self.decision.direction,
+                        owner: self.get_owner(),
                     }),
                 })
             } else {
-                self.previous.get_coord(coord)
+                self.previous.get_by_coord(coord)
+            }
+        }
+
+        fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
+            if self.max_id().get(Owner::Me) == &id {
+                Some(OrgWithCoord {
+                    coord: self.decision.coord,
+                    id,
+                    parent_id: self.decision.parent_id,
+                    root_id: self.get_root_id(),
+                    org_type: self.decision.organe_type,
+                })
+            } else {
+                self.previous.get_by_id(id)
             }
         }
 
         fn harvesting(&self) -> CoordMap<Harvesting> {
             let mut retour = self.previous.harvesting();
-            retour.remove(&self.current.coord);
-            if self.current.organe_type != OrganeType::Harvester {
+            retour.remove(&self.decision.coord);
+            if self.decision.organe_type != OrganeType::Harvester {
                 return retour;
             }
-            let en_face = self.en_face(self.current.coord, self.current.direction);
+            let en_face = self.en_face(self.decision.coord, self.decision.direction);
 
             if let Some(Cell {
                 coord: coord_prot,
@@ -577,8 +669,8 @@ pub mod state {
                     coord_prot.clone(),
                     Harvesting {
                         protein: prot.clone(),
-                        direction: self.current.direction,
-                        harvester_coord: self.current.coord,
+                        direction: self.decision.direction,
+                        harvester_coord: self.decision.coord,
                     },
                 );
             };
@@ -587,22 +679,22 @@ pub mod state {
 
         fn empty_cell(&self) -> CoordMap<EmptyCell> {
             let mut retour = self.previous.empty_cell();
-            retour.remove(&self.current.coord);
+            retour.remove(&self.decision.coord);
             retour
         }
 
         fn protein(&self) -> CoordMap<Protein> {
             let mut retour = self.previous.protein();
-            retour.remove(&self.current.coord);
+            retour.remove(&self.decision.coord);
             retour
         }
 
         fn organes_amis(&self) -> CoordMap<OrganeAmi> {
             let mut retour = self.previous.organes_amis();
             retour.insert(
-                self.current.coord,
+                self.decision.coord,
                 OrganeAmi {
-                    id: self.max_ami_id(),
+                    id: self.max_id().get(self.get_owner()).clone(),
                 },
             );
             retour
@@ -610,16 +702,17 @@ pub mod state {
 
         fn attacking(&self) -> CoordMap<Attacking> {
             let mut previous_attacking = self.previous.attacking();
-            if self.current.organe_type == OrganeType::Tentacle {
-                let Some(en_face) = self.en_face(self.current.coord, self.current.direction) else {
+            if self.decision.organe_type == OrganeType::Tentacle {
+                let Some(en_face) = self.en_face(self.decision.coord, self.decision.direction)
+                else {
                     return previous_attacking;
                 };
                 let Entity::Organe(org) = en_face.entity else {
                     return previous_attacking;
                 };
-                if org.owner == Owner::Ennemy {
+                if self.get_owner().is_ennemy(org.owner) {
                     previous_attacking.insert(
-                        self.current.coord,
+                        self.decision.coord,
                         Attacking {
                             target_coord: en_face.coord,
                             target_id: org.id,
@@ -636,6 +729,184 @@ pub mod state {
 
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
             self.previous.organe_ennemy_location()
+        }
+
+        fn action_set(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous
+                .action_set()
+                .update(self.decision.parent_id.get_owner(), |mut ids| {
+                    ids.remove(&self.get_root_id());
+                    ids
+                })
+        }
+
+        fn roots(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous.roots()
+        }
+    }
+
+    #[derive(Debug)]
+    pub struct SporeStep {
+        previous: Rc<dyn State>,
+        decision: Spore,
+        ressource_ami: Ressource,
+    }
+
+    impl SporeStep {
+        fn try_new(previous: Rc<dyn State>, decision: Spore) -> Option<Self> {
+            let ressource_ami = previous
+                .ressource_ami()
+                .checked_sub(Ressource::new(1, 1, 1, 1))?;
+            let (coor_spore, _) = previous
+                .organes_amis()
+                .into_iter()
+                .find(|(_, v)| v.id == decision.parent_id)?;
+            let dir = previous
+                .get_by_coord(coor_spore)
+                .and_then(|cell| match cell.entity {
+                    Entity::Organe(organe) => {
+                        Some(organe.dir).filter(|_| organe.owner == Owner::Me)
+                    }
+                    _ => None,
+                })?;
+            let mut curr_coor = coor_spore.clone();
+            for _ in 0..100 {
+                let Some(new_coor) = curr_coor.decaler(dir) else {
+                    return None;
+                };
+                curr_coor = new_coor;
+                if decision.coord == curr_coor {
+                    break;
+                }
+                if !previous
+                    .get_by_coord(curr_coor)
+                    .map(|c| c.can_grow())
+                    .unwrap_or(false)
+                {
+                    return None;
+                }
+            }
+            Some(Self {
+                decision,
+                previous,
+                ressource_ami,
+            })
+        }
+
+        fn get_new_root(&self) -> Id {
+            self.max_id().get(self.get_owner()).clone()
+        }
+    }
+
+    impl HaveRoot for SporeStep {
+        fn get_root_id(&self) -> Id {
+            self.previous
+                .get_by_id(self.decision.parent_id)
+                .map(|org| org.root_id)
+                .expect("pas de parent existant pour SporeStep")
+        }
+    }
+
+    impl State for SporeStep {
+        fn planification(&self) -> Planification {
+            self.previous
+                .planification()
+                .add_decision(Decision::Spore(self.decision))
+        }
+
+        fn max_id(&self) -> OwnerMap<Id> {
+            self.previous.max_id().increment(self.get_owner())
+        }
+
+        fn ressource_ami(&self) -> Ressource {
+            self.ressource_ami
+        }
+
+        fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
+            if coord == self.decision.coord {
+                Some(Cell {
+                    coord,
+                    entity: Entity::Organe(Organe {
+                        id: self.get_new_root(),
+                        parent_id: Id::zero(self.get_owner()),
+                        root_id: self.get_new_root(),
+                        organe_type: OrganeType::Root,
+                        dir: Direction::N,
+                        owner: self.get_owner(),
+                    }),
+                })
+            } else {
+                self.previous.get_by_coord(coord)
+            }
+        }
+
+        fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
+            if self.get_new_root() == id {
+                Some(OrgWithCoord {
+                    coord: self.decision.coord,
+                    id,
+                    parent_id: Id::zero(self.get_owner()),
+                    root_id: id,
+                    org_type: OrganeType::Root,
+                })
+            } else {
+                self.previous.get_by_id(id)
+            }
+        }
+
+        fn attacking(&self) -> CoordMap<Attacking> {
+            self.previous.attacking()
+        }
+
+        fn harvesting(&self) -> CoordMap<Harvesting> {
+            self.previous.harvesting()
+        }
+
+        fn empty_cell(&self) -> CoordMap<EmptyCell> {
+            let mut retour = self.previous.empty_cell();
+            retour.remove(&self.decision.coord);
+            retour
+        }
+
+        fn protein(&self) -> CoordMap<Protein> {
+            let mut retour = self.previous.protein();
+            retour.remove(&self.decision.coord);
+            retour
+        }
+
+        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
+            let mut retour = self.previous.organes_amis();
+            retour.insert(
+                self.decision.coord,
+                OrganeAmi {
+                    id: self.get_new_root(),
+                },
+            );
+            retour
+        }
+
+        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
+            self.previous.organe_ennemy_childs()
+        }
+
+        fn organe_ennemy_location(&self) -> IdMap<Coord> {
+            self.previous.organe_ennemy_location()
+        }
+
+        fn action_set(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous.action_set().update(Owner::Me, |mut ids| {
+                ids.remove(&self.get_root_id());
+                ids
+            })
+        }
+
+        fn roots(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous
+                .roots()
+                .update(self.decision.parent_id.get_owner(), |mut ids| {
+                    ids.insert(self.get_new_root());
+                    ids
+                })
         }
     }
 
@@ -698,22 +969,27 @@ pub mod state {
             self.previous.planification().new_turn()
         }
 
-        fn get_coord(&self, coord: Coord) -> Option<Cell> {
+        fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
             if self.detruit_coord.contains(&coord) {
-                return Some(Cell {
+                Some(Cell {
                     coord,
                     entity: Entity::Void,
-                });
+                })
+            } else {
+                self.previous.get_by_coord(coord)
             }
-            self.previous.get_coord(coord)
         }
 
-        fn action_count(&self) -> ActionCount {
-            ActionCount::default()
+        fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
+            if self.detruit_id.contains(&id) {
+                None
+            } else {
+                self.previous.get_by_id(id)
+            }
         }
 
-        fn max_ami_id(&self) -> Id {
-            self.previous.max_ami_id()
+        fn max_id(&self) -> OwnerMap<Id> {
+            self.previous.max_id()
         }
 
         fn ressource_ami(&self) -> Ressource {
@@ -761,6 +1037,14 @@ pub mod state {
             locations.retain(|_key, value| !self.detruit_coord.contains(value));
             locations
         }
+
+        fn action_set(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous.roots()
+        }
+
+        fn roots(&self) -> OwnerMap<HashSet<Id>> {
+            self.previous.roots()
+        }
     }
 }
 
@@ -772,13 +1056,15 @@ pub mod decision {
         #[default]
         Wait,
         Grow(Grow),
+        Spore(Spore),
     }
 
-    impl ToString for Decision {
-        fn to_string(&self) -> String {
+    impl ToCommand for Decision {
+        fn to_command(&self) -> String {
             match self {
                 Decision::Wait => "WAIT".to_string(),
-                Decision::Grow(grow) => grow.to_string(),
+                Decision::Grow(grow) => grow.to_command(),
+                Decision::Spore(spore) => spore.to_command(),
             }
         }
     }
@@ -791,21 +1077,103 @@ pub mod decision {
         pub direction: Direction,
     }
 
-    impl ToString for Grow {
-        fn to_string(&self) -> String {
+    impl ToCommand for Grow {
+        fn to_command(&self) -> String {
             format!(
                 "GROW {} {} {} {}",
-                self.parent_id.to_string(),
-                self.coord.to_string(),
-                self.organe_type.to_string(),
-                self.direction.to_string()
+                self.parent_id.to_command(),
+                self.coord.to_command(),
+                self.organe_type.to_command(),
+                self.direction.to_command()
             )
         }
+    }
+
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    pub struct Spore {
+        pub parent_id: Id,
+        pub coord: Coord,
+    }
+
+    impl ToCommand for Spore {
+        fn to_command(&self) -> String {
+            format!(
+                "SPORE {} {}",
+                self.parent_id.to_command(),
+                self.coord.to_command()
+            )
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    pub struct Wait {
+        pub root_id: Id,
     }
 }
 
 pub mod molecule {
+    use std::fmt::Debug;
+
     use super::atome::*;
+
+    #[derive(PartialEq, Eq, Debug, Clone, Copy, Default)]
+    pub struct OwnerMap<T> {
+        friend: T,
+        ennemy: T,
+    }
+
+    impl<T> OwnerMap<T> {
+        pub fn new(friend: T, ennemy: T) -> Self {
+            OwnerMap { friend, ennemy }
+        }
+
+        pub fn update<F>(mut self, owner: Owner, func: F) -> Self
+        where
+            F: FnOnce(T) -> T,
+        {
+            match owner {
+                Owner::Me => {
+                    self.friend = func(self.friend);
+                }
+                Owner::Ennemy => {
+                    self.ennemy = func(self.ennemy);
+                }
+            };
+            self
+        }
+
+        pub fn get(&self, owner: Owner) -> &T {
+            match owner {
+                Owner::Me => &self.friend,
+                Owner::Ennemy => &self.ennemy,
+            }
+        }
+    }
+
+    impl OwnerMap<Id> {
+        pub fn increment(self, owner: Owner) -> Self {
+            self.update(owner, |id| id.increment())
+        }
+
+        pub fn insert_max(self, new_id: Id) -> Self {
+            self.update(new_id.get_owner(), |id| {
+                if id.get_num() < new_id.get_num() {
+                    new_id
+                } else {
+                    id
+                }
+            })
+        }
+    }
+
+    impl Default for OwnerMap<Id> {
+        fn default() -> Self {
+            Self {
+                friend: Id::zero(Owner::Me),
+                ennemy: Id::zero(Owner::Ennemy),
+            }
+        }
+    }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct Attacking {
@@ -820,9 +1188,18 @@ pub mod molecule {
         pub harvester_coord: Coord,
     }
 
-    #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct OrganeAmi {
         pub id: Id,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct OrgWithCoord {
+        pub coord: Coord,
+        pub id: Id,
+        pub parent_id: Id,
+        pub root_id: Id,
+        pub org_type: OrganeType,
     }
 
     pub struct Fertilite {
@@ -834,9 +1211,27 @@ pub mod molecule {
 }
 
 pub mod atome {
-    use std::collections::HashMap;
+    use std::{collections::HashMap, ops::Range};
 
     use super::decision::Decision;
+
+    pub trait ToCommand {
+        fn to_command(&self) -> String;
+    }
+
+    pub trait HaveRoot {
+        fn get_root_id(&self) -> Id;
+    }
+
+    pub trait HaveOwner {
+        fn get_owner(&self) -> Owner;
+    }
+
+    impl<T: HaveRoot> HaveOwner for T {
+        fn get_owner(&self) -> Owner {
+            self.get_root_id().get_owner()
+        }
+    }
 
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
     pub enum Protein {
@@ -866,8 +1261,8 @@ pub mod atome {
         }
     }
 
-    impl ToString for Direction {
-        fn to_string(&self) -> String {
+    impl ToCommand for Direction {
+        fn to_command(&self) -> String {
             match self {
                 Direction::N => "N",
                 Direction::E => "E",
@@ -897,8 +1292,8 @@ pub mod atome {
             }
         }
     }
-    impl ToString for OrganeType {
-        fn to_string(&self) -> String {
+    impl ToCommand for OrganeType {
+        fn to_command(&self) -> String {
             match self {
                 OrganeType::Basic => "BASIC",
                 OrganeType::Root => "ROOT",
@@ -910,19 +1305,38 @@ pub mod atome {
         }
     }
 
-    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord, Default)]
-    pub struct Id(u8);
+    #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+    pub struct Id {
+        owner: Owner,
+        id: u8,
+    }
+
     impl Id {
-        pub fn new(id: u8) -> Self {
-            Id(id)
+        pub fn new(owner: Owner, id: u8) -> Self {
+            Id { owner, id }
+        }
+        pub fn zero(owner: Owner) -> Self {
+            Id { owner, id: 0 }
         }
         pub fn increment(self) -> Self {
-            Self(self.0 + 1)
+            Self {
+                owner: self.owner,
+                id: self.id.saturating_add(1),
+            }
+        }
+
+        pub fn get_num(&self) -> u8 {
+            self.id
         }
     }
-    impl ToString for Id {
-        fn to_string(&self) -> String {
-            self.0.to_string()
+    impl HaveOwner for Id {
+        fn get_owner(&self) -> Owner {
+            self.owner
+        }
+    }
+    impl ToCommand for Id {
+        fn to_command(&self) -> String {
+            self.id.to_string()
         }
     }
 
@@ -966,6 +1380,19 @@ pub mod atome {
         Ennemy,
     }
 
+    impl Owner {
+        pub fn switch_side(self) -> Self {
+            match self {
+                Owner::Me => Owner::Ennemy,
+                Owner::Ennemy => Owner::Me,
+            }
+        }
+
+        pub fn is_ennemy(self, other: Self) -> bool {
+            self == other.switch_side()
+        }
+    }
+
     pub type CoordMap<T> = HashMap<Coord, T>;
     pub type IdMap<T> = HashMap<Id, T>;
     #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -987,8 +1414,8 @@ pub mod atome {
         }
     }
 
-    impl ToString for Coord {
-        fn to_string(&self) -> String {
+    impl ToCommand for Coord {
+        fn to_command(&self) -> String {
             format!("{} {}", self.x, self.y)
         }
     }
@@ -1071,6 +1498,16 @@ pub mod atome {
         }
     }
 
+    impl IntoIterator for ActionCount {
+        type Item = u32;
+
+        type IntoIter = Range<u32>;
+
+        fn into_iter(self) -> Self::IntoIter {
+            0..self.0
+        }
+    }
+
     #[derive(Debug, Clone, Hash, PartialEq, Eq)]
     pub struct Planification {
         content: Vec<Vec<Decision>>,
@@ -1147,7 +1584,7 @@ mod parsing {
             .parse()
             .expect("y pas un nombre");
         let type_str: &str = inputs.next().expect("pas de type");
-        let owner: Option<Owner> = match inputs.next().expect("pas d'owner") {
+        let owner_opt: Option<Owner> = match inputs.next().expect("pas d'owner") {
             "1" => Some(Owner::Me),
             "0" => Some(Owner::Ennemy),
             _ => None,
@@ -1189,13 +1626,14 @@ mod parsing {
                     "SPORER" => OrganeType::Sporer,
                     _ => panic!("pas d'organe type valide: {organ_type_str}"),
                 };
+                let owner = owner_opt.expect("pas d'owner");
                 Entity::Organe(Organe {
                     organe_type,
                     dir: organe_dir.expect("pas de dir"),
-                    owner: owner.expect("pas d'owner"),
-                    id: Id::new(organe_id),
-                    parent_id: Id::new(organe_parent_id),
-                    root_id: Id::new(organe_root_id),
+                    owner,
+                    id: Id::new(owner, organe_id),
+                    parent_id: Id::new(owner, organe_parent_id),
+                    root_id: Id::new(owner, organe_root_id),
                 })
             }
         };
