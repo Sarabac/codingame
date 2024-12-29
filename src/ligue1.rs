@@ -105,6 +105,21 @@ pub mod ai {
     }
 
     pub fn juger(state: Rc<dyn State>) -> WeightedState {
+        let planification = state.planification().take_content();
+        let planifiaction_len = planification.len();
+        let wait_le_plus_tard_possible: usize = state
+            .planification()
+            .take_content()
+            .into_iter()
+            .enumerate()
+            .flat_map(|(i, v)| v.into_iter().map(move |d| (i, d)))
+            .map(|(i, d)| match d {
+                Decision::Wait if i > 5 => 0,
+                Decision::Wait => i.abs_diff(planifiaction_len) * 5,
+                _ => 0,
+            })
+            .sum();
+
         let nb_harvesting = state.harvesting().len();
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
@@ -116,16 +131,19 @@ pub mod ai {
         let nb_ami = state.organes_amis().len() * 3;
         let nb_ennemi = state.organe_ennemy_location().len() * 3;
 
-        let weight = i32::try_from(1 + note_nb_harvesting + note_resources + nb_ami)
-            .unwrap_or(i32::MAX)
-            .saturating_sub(i32::try_from(nb_ennemi).unwrap_or(i32::MAX));
+        let weight = u32::try_from(1 + note_nb_harvesting + note_resources + nb_ami)
+            .unwrap_or(u32::MAX)
+            .saturating_sub(u32::try_from(nb_ennemi).unwrap_or(u32::MAX))
+            .saturating_add(5)
+            .saturating_sub(u32::try_from(wait_le_plus_tard_possible).unwrap_or(u32::MAX))
+            .clamp(0, u32::MAX);
         WeightedState { state, weight }
     }
 
     #[derive(Debug, Clone)]
     pub struct WeightedState {
         pub state: Rc<dyn State>,
-        pub weight: i32,
+        pub weight: u32,
     }
 
     pub struct Managing {
@@ -1070,6 +1088,10 @@ pub mod atome {
 
         pub fn take_first_turn(self) -> Vec<Decision> {
             self.content.into_iter().next().unwrap_or_default()
+        }
+
+        pub fn take_content(self) -> Vec<Vec<Decision>> {
+            self.content
         }
     }
 

@@ -1,3 +1,5 @@
+use std::{os::unix::process::parent_id, vec};
+
 use crate::ligue1::{atome::*, state::*};
 
 #[derive(Debug, Clone)]
@@ -25,6 +27,52 @@ impl StateBuilder {
             action_count,
             cells,
         )
+    }
+
+    pub fn add_cell(mut self, cell: Cell) -> Self {
+        self.cells.push(cell);
+        self
+    }
+
+    pub fn add_cells(mut self, mut cell: Vec<Cell>) -> Self {
+        self.cells.append(&mut cell);
+        self
+    }
+
+    pub fn with_ressources_ami(mut self, ressource: Ressource) -> Self {
+        self.ressources_ami = ressource;
+        self
+    }
+}
+
+impl StateBuilder {
+    pub fn carre_vide_3() -> Self {
+        Self {
+            dimension: Dimension {
+                height: 3,
+                width: 3,
+            },
+            ressources_ami: Ressource::new(1, 1, 1, 1),
+            ressources_ennemy: Ressource::new(1, 1, 1, 1),
+            action_count: ActionCount::default(),
+            cells: Vec::default(),
+        }
+    }
+
+    pub fn new_ligne_de_3_root_a_gauche() -> Self {
+        Self {
+            dimension: Dimension {
+                height: 1,
+                width: 3,
+            },
+            ressources_ami: Ressource::new(1, 1, 1, 1),
+            ressources_ennemy: Ressource::new(1, 1, 1, 1),
+            action_count: ActionCount::default(),
+            cells: vec![Cell {
+                coord: Coord { x: 0, y: 0 },
+                ..Self::build_root()
+            }],
+        }
     }
 
     /**
@@ -97,5 +145,52 @@ impl StateBuilder {
                 owner: Owner::Me,
             }),
         }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct OrganismBuilder {
+    decalages: Vec<Direction>,
+}
+
+impl OrganismBuilder {
+    pub fn add_basic(mut self, decale: Direction) -> Self {
+        self.decalages.push(decale);
+        self
+    }
+
+    pub fn build(&self, owner: Owner, depart: Coord) -> Vec<Cell> {
+        let mut curr_coord = depart;
+        let mut curr_id = Id::default();
+        let root_id = Id::default();
+        let current_cell = Cell {
+            coord: curr_coord.clone(),
+            entity: Entity::Organe(Organe {
+                id: curr_id,
+                parent_id: curr_id,
+                root_id,
+                organe_type: OrganeType::Root,
+                dir: Direction::N,
+                owner,
+            }),
+        };
+        let mut resultat = vec![current_cell];
+        for dir in self.decalages.iter() {
+            curr_coord = curr_coord.decaler(dir.clone()).expect("mauvaise direction");
+            let parent_id = curr_id;
+            curr_id = curr_id.increment();
+            resultat.push(Cell {
+                coord: curr_coord,
+                entity: Entity::Organe(Organe {
+                    id: curr_id,
+                    parent_id,
+                    root_id,
+                    organe_type: OrganeType::Basic,
+                    dir: Direction::N,
+                    owner,
+                }),
+            });
+        }
+        resultat
     }
 }
