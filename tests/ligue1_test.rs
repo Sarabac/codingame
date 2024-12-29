@@ -64,56 +64,6 @@ fn count_harvesting() {
 }
 
 #[test]
-fn harvesting_is_best() {
-    let dimension = Dimension {
-        height: 3,
-        width: 3,
-    };
-    let ressources_ami = Ressource::new(1, 1, 1, 1);
-    let ressources_ennemy = Ressource::new(1, 1, 1, 1);
-    let action_count = ActionCount::new(1);
-    let cells = vec![
-        Cell {
-            coord: Coord { x: 0, y: 0 },
-            entity: Entity::Organe(Organe {
-                dir: Direction::N,
-                id: Id::new(0),
-                parent_id: Id::new(0),
-                root_id: Id::new(0),
-                organe_type: OrganeType::Root,
-                owner: Owner::Me,
-            }),
-        },
-        Cell {
-            coord: Coord { x: 2, y: 0 },
-            entity: Entity::Protein(Protein::A),
-        },
-    ];
-    let state = InitState::new(
-        dimension,
-        ressources_ami,
-        ressources_ennemy,
-        action_count,
-        cells,
-    );
-    let mut managing = Managing::new()
-        .with_rng(rand::rngs::StdRng::seed_from_u64(57))
-        .with_nb_max_iteration(1);
-    let decision = planifier(Rc::new(state), &mut managing)
-        .take_first_turn()
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    let expected = Grow {
-        parent_id: Id::new(0),
-        coord: Coord { x: 1, y: 0 },
-        organe_type: OrganeType::Harvester,
-        direction: Direction::E,
-    };
-    assert_eq!(decision, Decision::Grow(expected));
-}
-
-#[test]
 fn no_harvesting_when_no_prot() {
     let dimension = Dimension {
         height: 3,

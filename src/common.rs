@@ -46,7 +46,7 @@ impl StateBuilder {
 }
 
 impl StateBuilder {
-    pub fn carre_vide_3() -> Self {
+    pub fn new_carre_vide_3() -> Self {
         Self {
             dimension: Dimension {
                 height: 3,
