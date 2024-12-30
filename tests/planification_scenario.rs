@@ -45,7 +45,7 @@ fn choppe_prot(rng: u64) -> Result<(), Box<dyn Debug>> {
 
 #[test]
 fn choppe_prot_repeated() -> RandomTestingResult {
-    random_testing(choppe_prot, 100, 10)
+    random_testing(choppe_prot, 100, 8)
 }
 
 fn simple_va_harvester(rng: u64) -> Result<(), Box<dyn Debug>> {
@@ -105,7 +105,7 @@ fn va_attaquer(rng: u64) -> Result<(), Box<dyn Debug>> {
     let state = Rc::new(builder.build());
     let mut managing = Managing::new()
         .with_rng(rand::rngs::StdRng::seed_from_u64(rng))
-        .with_nb_to_choose(50)
+        .with_nb_to_choose(30)
         .with_nb_max_iteration(6);
 
     // THEN
@@ -130,5 +130,5 @@ fn va_attaquer(rng: u64) -> Result<(), Box<dyn Debug>> {
 
 #[test]
 fn va_attaquer_repeated() -> RandomTestingResult {
-    random_testing(va_attaquer, 100, 10)
+    random_testing(va_attaquer, 10, 0)
 }

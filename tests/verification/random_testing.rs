@@ -31,6 +31,7 @@ where
             la_plus_presente: Box::new(la_plus_presente),
         })
     } else {
+        dbg!(format!("nombre erreur: {nb_max_err}/{taille}"));
         Ok(())
     }
 }

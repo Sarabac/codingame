@@ -77,9 +77,9 @@ fn no_harvesting_when_no_prot() {
             coord: Coord { x: 0, y: 0 },
             entity: Entity::Organe(Organe {
                 dir: Direction::N,
-                id: Id::new(0),
-                parent_id: Id::new(0),
-                root_id: Id::new(0),
+                id: Id::zero(Owner::Me),
+                parent_id: Id::zero(Owner::Me),
+                root_id: Id::zero(Owner::Me),
                 organe_type: OrganeType::Root,
                 owner: Owner::Me,
             }),

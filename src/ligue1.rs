@@ -26,6 +26,8 @@ pub mod ai {
         time::{Duration, Instant},
     };
 
+    use std::convert::TryFrom;
+
     use itertools::iproduct;
 
     use super::{atome::*, decision::*, molecule::*, state::*};
@@ -188,11 +190,11 @@ pub mod ai {
                 debut: Instant::now(),
                 permier_tour_duree: Duration::from_millis(1000),
                 tours_suivant_duree: Duration::from_millis(50),
-                end_offset: Duration::from_millis(5),
-                nb_max_iteration: 100,
+                end_offset: Duration::from_millis(10),
+                nb_max_iteration: 4,
                 tour_nb: 0,
                 rng: rand::rngs::StdRng::seed_from_u64(81),
-                nb_to_choose: 150,
+                nb_to_choose: 30,
             }
         }
 
@@ -321,7 +323,7 @@ pub mod state {
                 .filter(|o| o.organe_type == OrganeType::Sporer)
             {
                 let mut current_coord: Coord = org.coord;
-                'segment: loop {
+                'segment: for i in 0..1000u32 {
                     let Some(new_corr) = current_coord.decaler(org.dir) else {
                         break 'segment;
                     };
@@ -333,6 +335,9 @@ pub mod state {
                         });
                     } else {
                         break 'segment;
+                    }
+                    if i == 1000 {
+                        panic!("boucle infinie dans 'segment")
                     }
                 }
             }
@@ -762,7 +767,9 @@ pub mod state {
 
         fn child_by_parent(&self, parent_id: Id) -> HashSet<Id> {
             let mut retour = self.previous.child_by_parent(parent_id);
+            if parent_id == self.decision.parent_id {
             retour.insert(self.get_last_id());
+            }
             retour
         }
 
@@ -810,7 +817,7 @@ pub mod state {
             let ressource_map = previous
                 .ressource()
                 .update(decision.parent_id.get_owner(), |_| new_ressource);
-            
+
             Some(Self {
                 decision,
                 previous,
@@ -1031,8 +1038,7 @@ pub mod state {
             if self.detruit_id.contains(&parent_id) {
                 return HashSet::new();
             }
-            let childs = self.previous.child_by_parent(parent_id);
-            childs.difference(&self.detruit_id).cloned().collect()
+            self.previous.child_by_parent(parent_id).difference(&self.detruit_id).cloned().collect()
         }
 
         fn action_set(&self) -> OwnerMap<HashSet<Id>> {

@@ -1,4 +1,3 @@
-use std::{os::unix::process::parent_id, vec};
 
 use crate::ligue1::{atome::*, state::*};
 
@@ -138,9 +137,9 @@ impl StateBuilder {
             coord: Coord { x: 0, y: 0 },
             entity: Entity::Organe(Organe {
                 dir: Direction::N,
-                id: Id::new(0),
-                parent_id: Id::new(0),
-                root_id: Id::new(0),
+                id: Id::zero(Owner::Me),
+                parent_id: Id::zero(Owner::Me),
+                root_id: Id::zero(Owner::Me),
                 organe_type: OrganeType::Root,
                 owner: Owner::Me,
             }),
@@ -161,8 +160,8 @@ impl OrganismBuilder {
 
     pub fn build(&self, owner: Owner, depart: Coord) -> Vec<Cell> {
         let mut curr_coord = depart;
-        let mut curr_id = Id::default();
-        let root_id = Id::default();
+        let mut curr_id = Id::zero(owner);
+        let root_id = Id::zero(owner);
         let current_cell = Cell {
             coord: curr_coord.clone(),
             entity: Entity::Organe(Organe {
