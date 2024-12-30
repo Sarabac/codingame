@@ -74,7 +74,12 @@ pub mod ai {
         while !process.is_empty() {
             let (finis, encore) = process
                 .into_iter()
-                .filter_map(|s|Some((s.clone(), s.action_set().get(Owner::Me).iter().next().cloned()?)))
+                .filter_map(|s| {
+                    Some((
+                        s.clone(),
+                        s.action_set().get(Owner::Me).iter().next().cloned()?,
+                    ))
+                })
                 .flat_map(|(s, root_id)| generer_step(s, root_id))
                 .partition(|s| s.action_set().get(Owner::Me).is_empty());
             process = encore;
@@ -86,9 +91,9 @@ pub mod ai {
     fn generer_step(state: Rc<dyn State>, root_id: Id) -> impl Iterator<Item = Rc<dyn State>> {
         let wait_step = Rc::new(WaitStep::new(state.clone(), Wait { root_id })) as Rc<dyn State>;
         state
-            .fertile_coords()
+            .grow_candidate()
             .into_iter()
-            .flat_map(|(coord, Fertilite { parent_id })| generer_grow(coord, parent_id))
+            .flat_map(|(coord, GrowCandidate { parent_id })| generer_grow(coord, parent_id))
             .filter_map(move |grow| GrowStep::try_new(state.clone(), grow))
             .map(|s| Rc::new(s) as Rc<dyn State>)
             .chain(std::iter::once(wait_step))
@@ -131,10 +136,10 @@ pub mod ai {
         let nb_harvesting = state.harvesting().len();
         let note_nb_harvesting = nb_harvesting.min(3) * 4;
 
-        let resources = state.ressource_ami();
+        let resources = state.ressource();
         let note_resources = Protein::all()
             .into_iter()
-            .filter(|p| resources.get(p) != 0)
+            .filter(|p| resources.get(Owner::Me).get(p) != 0)
             .count();
         let nb_ami = state.organes_amis().len() * 3;
         let nb_ennemi = state.organe_ennemy_location().len() * 3;
@@ -241,7 +246,7 @@ pub mod state {
         fn planification(&self) -> Planification;
         fn action_set(&self) -> OwnerMap<HashSet<Id>>;
         fn max_id(&self) -> OwnerMap<Id>;
-        fn ressource_ami(&self) -> Ressource;
+        fn ressource(&self) -> OwnerMap<Ressource>;
         fn get_by_coord(&self, coord: Coord) -> Option<Cell>;
         fn get_by_id(&self, id: Id) -> Option<OrgWithCoord>;
 
@@ -252,7 +257,8 @@ pub mod state {
         fn protein(&self) -> CoordMap<Protein>;
         fn organes_amis(&self) -> CoordMap<OrganeAmi>;
 
-        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>>;
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord>;
+        fn child_map(&self) -> IdMap<HashSet<Id>>;
         fn organe_ennemy_location(&self) -> IdMap<Coord>;
 
         fn get_neighbour(&self, coor: Coord) -> [Option<Cell>; 4] {
@@ -265,10 +271,17 @@ pub mod state {
             coord.decaler(direction).and_then(|c| self.get_by_coord(c))
         }
 
-        fn fertile_coords(&self) -> CoordMap<Fertilite> {
-            let empty_cell: HashSet<Coord> = self.empty_cell().keys().cloned().collect();
-            let prot: HashSet<Coord> = self.protein().keys().cloned().collect();
-            let empty_or_prot: HashSet<Coord> = empty_cell.union(&prot).cloned().collect();
+        fn fertile_cell(&self) -> CoordMap<Fertile> {
+            self.protein()
+                .into_iter()
+                .map(|(c, p)| (c, Some(p)))
+                .chain(self.empty_cell().keys().map(|c| (c.clone(), None)))
+                .map(|(coord, protein)| (coord, Fertile { coord, protein }))
+                .collect()
+        }
+
+        fn grow_candidate(&self) -> CoordMap<GrowCandidate> {
+            let empty_or_prot: HashSet<Coord> = self.fertile_cell().keys().cloned().collect();
             self.organes_amis()
                 .into_iter()
                 .flat_map(|(coord, org_ami)| {
@@ -279,12 +292,12 @@ pub mod state {
                         .map(move |c| {
                             (
                                 c.coord,
-                                Fertilite {
+                                GrowCandidate {
                                     parent_id: org_ami.id,
                                 },
                             )
                         })
-                        .collect::<CoordMap<Fertilite>>()
+                        .collect::<CoordMap<GrowCandidate>>()
                 })
                 .collect()
         }
@@ -293,7 +306,7 @@ pub mod state {
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct InitState {
         dimension: Dimension,
-        ressources_ami: Ressource,
+        ressources_map: OwnerMap<Ressource>,
         ressources_ennemy: Ressource,
         root_set: OwnerMap<HashSet<Id>>,
         action_count: ActionCount,
@@ -306,7 +319,8 @@ pub mod state {
         organe_ami_cells: CoordMap<OrganeAmi>,
         harvesting_cells: CoordMap<Harvesting>,
 
-        organe_ennemy_relation_map: IdMap<HashSet<Id>>,
+        organes_by_root: IdMap<HashSet<OrgWithCoord>>,
+        child_map: IdMap<HashSet<Id>>,
         organe_ennemy_location_by_id_map: IdMap<Coord>,
     }
 
@@ -318,6 +332,7 @@ pub mod state {
             action_count: ActionCount,
             cells: Vec<Cell>,
         ) -> Self {
+            let ressources_map: OwnerMap<Ressource> = OwnerMap::new(ressources_ami, ressources_ennemy);
             let mut max_id: OwnerMap<Id> = OwnerMap::default();
             let mut root_set: OwnerMap<HashSet<Id>> = OwnerMap::default();
             let coord_cells: CoordMap<Cell> = cells.iter().map(|c| (c.coord, c.clone())).collect();
@@ -329,7 +344,8 @@ pub mod state {
                     .collect();
             let mut organe_ami_cells: CoordMap<OrganeAmi> = HashMap::new();
             let mut harvesting_cells: CoordMap<Harvesting> = HashMap::new();
-            let mut organe_ennemy_relation_map: IdMap<HashSet<Id>> = HashMap::new();
+            let mut organes_by_root: IdMap<HashSet<OrgWithCoord>> = HashMap::new();
+            let mut child_map: IdMap<HashSet<Id>> = HashMap::new();
             let mut organe_ennemy_location_by_id_map: IdMap<Coord> = HashMap::new();
 
             for cell in cells.into_iter() {
@@ -343,16 +359,21 @@ pub mod state {
                     }
                     Entity::Organe(org) => {
                         max_id = max_id.insert_max(org.id);
-                        id_map.insert(
-                            org.id,
-                            OrgWithCoord {
-                                coord,
-                                id: org.id,
-                                parent_id: org.parent_id,
-                                root_id: org.root_id,
-                                org_type: org.organe_type,
-                            },
-                        );
+                        let org_with_coord = OrgWithCoord {
+                            coord,
+                            id: org.id,
+                            parent_id: org.parent_id,
+                            root_id: org.root_id,
+                            org_type: org.organe_type,
+                        };
+                        id_map.insert(org.id,org_with_coord);
+                        organes_by_root.entry(org.root_id).or_default().insert(org_with_coord);
+                        if org.id != org.parent_id {
+                            child_map
+                                .entry(org.parent_id)
+                                .or_default()
+                                .insert(org.id);
+                        };
 
                         if org.organe_type == OrganeType::Root {
                             root_set = root_set.update(org.owner, |mut ids| {
@@ -361,38 +382,35 @@ pub mod state {
                             })
                         }
 
+                        if org.organe_type == OrganeType::Harvester {
+                            let en_face = coord
+                                .decaler(org.dir)
+                                .and_then(|coo| coord_cells.get(&coo));
+                            if let Some(Cell {
+                                coord: coord_prot,
+                                entity: Entity::Protein(prot),
+                            }) = en_face
+                            {
+                                harvesting_cells.insert(
+                                    coord_prot.clone(),
+                                    Harvesting {
+                                        protein: prot.clone(),
+                                        direction: org.dir,
+                                        harvester_coord: coord,
+                                        harvester_id: org.id
+                                    },
+                                );
+                            };
+                        }
+
                         match org.owner {
                             Owner::Ennemy => {
-                                if org.id != org.parent_id {
-                                    organe_ennemy_relation_map
-                                        .entry(org.parent_id)
-                                        .or_default()
-                                        .insert(org.id);
-                                };
                                 organe_ennemy_location_by_id_map.insert(org.id, coord);
                             }
                             Owner::Me => {
                                 organe_ami_cells.insert(coord, OrganeAmi { id: org.id });
 
-                                if org.organe_type == OrganeType::Harvester {
-                                    let en_face = coord
-                                        .decaler(org.dir)
-                                        .and_then(|coo| coord_cells.get(&coo));
-                                    if let Some(Cell {
-                                        coord: coord_prot,
-                                        entity: Entity::Protein(prot),
-                                    }) = en_face
-                                    {
-                                        harvesting_cells.insert(
-                                            coord_prot.clone(),
-                                            Harvesting {
-                                                protein: prot.clone(),
-                                                direction: org.dir,
-                                                harvester_coord: coord,
-                                            },
-                                        );
-                                    };
-                                }
+                                
                             }
                         }
                     }
@@ -400,7 +418,7 @@ pub mod state {
             }
             Self {
                 dimension,
-                ressources_ami,
+                ressources_map,
                 ressources_ennemy,
                 root_set,
                 coord_cells,
@@ -411,8 +429,9 @@ pub mod state {
                 prot_cells,
                 organe_ami_cells,
                 harvesting_cells,
-                organe_ennemy_relation_map,
+                child_map,
                 organe_ennemy_location_by_id_map,
+                organes_by_root,
             }
         }
 
@@ -435,8 +454,8 @@ pub mod state {
         fn max_id(&self) -> OwnerMap<Id> {
             self.max_id
         }
-        fn ressource_ami(&self) -> Ressource {
-            self.ressources_ami
+        fn ressource(&self) -> OwnerMap<Ressource> {
+            self.ressources_map
         }
         fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
             match self.coord_cells.get(&coord) {
@@ -471,8 +490,8 @@ pub mod state {
             CoordMap::new()
         }
 
-        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
-            self.organe_ennemy_relation_map.clone()
+        fn child_map(&self) -> IdMap<HashSet<Id>> {
+            self.child_map.clone()
         }
 
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
@@ -489,6 +508,11 @@ pub mod state {
 
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.root_set.clone()
+        }
+        
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
+            let retour = self.organes_by_root.get(&root_id).cloned().unwrap_or_default();
+            retour
         }
     }
 
@@ -519,8 +543,8 @@ pub mod state {
             self.previous.max_id()
         }
 
-        fn ressource_ami(&self) -> Ressource {
-            self.previous.ressource_ami()
+        fn ressource(&self) -> OwnerMap<Ressource> {
+            self.previous.ressource()
         }
 
         fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
@@ -547,8 +571,8 @@ pub mod state {
             self.previous.attacking()
         }
 
-        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
-            self.previous.organe_ennemy_childs()
+        fn child_map(&self) -> IdMap<HashSet<Id>> {
+            self.previous.child_map()
         }
 
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
@@ -571,28 +595,39 @@ pub mod state {
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.previous.roots()
         }
+        
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
+            self.previous.organes_by_root(root_id)
+        }
     }
 
     #[derive(Debug)]
     pub struct GrowStep {
         previous: Rc<dyn State>,
         decision: Grow,
-        ami_ressource: Ressource,
+        ressource_map: OwnerMap<Ressource>,
     }
 
     impl GrowStep {
         pub fn try_new(previous: Rc<dyn State>, decision: Grow) -> Option<Self> {
-            let mut ami_ressource = previous
-                .ressource_ami()
+            let mut new_ressource = previous
+                .ressource()
+                .get(decision.parent_id.get_owner())
                 .checked_sub(decision.organe_type.prix())?;
-            if let Some(prot) = previous.protein().get(&decision.coord) {
-                ami_ressource = ami_ressource.ajout(prot.clone());
+            let fertilite = previous.fertile_cell().get(&decision.coord).cloned()?;
+            if let Some(prot) = fertilite.protein {
+                new_ressource = new_ressource.ajout_3(prot.clone());
             };
+            let ressource_map = previous.ressource().update(decision.parent_id.get_owner(), |_| new_ressource);
             Some(Self {
                 previous,
                 decision,
-                ami_ressource,
+                ressource_map,
             })
+        }
+
+        fn get_last_id(&self) -> Id {
+            self.max_id().get(self.get_owner()).clone()
         }
     }
 
@@ -616,8 +651,8 @@ pub mod state {
             self.previous.max_id().increment(self.get_owner())
         }
 
-        fn ressource_ami(&self) -> Ressource {
-            self.ami_ressource
+        fn ressource(&self) -> OwnerMap<Ressource> {
+            self.ressource_map
         }
 
         fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
@@ -625,7 +660,7 @@ pub mod state {
                 Some(Cell {
                     coord: self.decision.coord,
                     entity: Entity::Organe(Organe {
-                        id: self.max_id().get(self.get_owner()).clone(),
+                        id: self.get_last_id(),
                         parent_id: self.decision.parent_id,
                         root_id: self.get_root_id(),
                         organe_type: self.decision.organe_type,
@@ -639,7 +674,7 @@ pub mod state {
         }
 
         fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
-            if self.max_id().get(Owner::Me) == &id {
+            if self.get_last_id() == id {
                 Some(OrgWithCoord {
                     coord: self.decision.coord,
                     id,
@@ -671,6 +706,7 @@ pub mod state {
                         protein: prot.clone(),
                         direction: self.decision.direction,
                         harvester_coord: self.decision.coord,
+                        harvester_id: self.get_last_id()
                     },
                 );
             };
@@ -723,8 +759,10 @@ pub mod state {
             previous_attacking
         }
 
-        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
-            self.previous.organe_ennemy_childs()
+        fn child_map(&self) -> IdMap<HashSet<Id>> {
+            let mut retour = self.previous.child_map();
+            retour.entry(self.decision.parent_id).or_default().insert(self.get_last_id());
+            retour
         }
 
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
@@ -743,20 +781,36 @@ pub mod state {
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.previous.roots()
         }
+        
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
+            let mut retour = self.previous.organes_by_root(root_id);
+            if self.get_root_id() == root_id {
+                if let Some(org) = self.get_by_id(self.get_last_id()) {
+                    retour.insert(org);
+                };
+            };
+            retour
+        }
     }
 
     #[derive(Debug)]
     pub struct SporeStep {
         previous: Rc<dyn State>,
         decision: Spore,
-        ressource_ami: Ressource,
+        ressource_map: OwnerMap<Ressource>,
     }
 
     impl SporeStep {
         fn try_new(previous: Rc<dyn State>, decision: Spore) -> Option<Self> {
-            let ressource_ami = previous
-                .ressource_ami()
+            let mut new_ressource = previous
+                .ressource()
+                .get(decision.parent_id.get_owner())
                 .checked_sub(Ressource::new(1, 1, 1, 1))?;
+                let fertilite = previous.fertile_cell().get(&decision.coord).cloned()?;
+                if let Some(prot) = fertilite.protein {
+                    new_ressource = new_ressource.ajout_3(prot.clone());
+                };
+                let ressource_map = previous.ressource().update(decision.parent_id.get_owner(), |_| new_ressource);
             let (coor_spore, _) = previous
                 .organes_amis()
                 .into_iter()
@@ -789,11 +843,11 @@ pub mod state {
             Some(Self {
                 decision,
                 previous,
-                ressource_ami,
+                ressource_map,
             })
         }
 
-        fn get_new_root(&self) -> Id {
+        fn get_new_root_id(&self) -> Id {
             self.max_id().get(self.get_owner()).clone()
         }
     }
@@ -818,8 +872,8 @@ pub mod state {
             self.previous.max_id().increment(self.get_owner())
         }
 
-        fn ressource_ami(&self) -> Ressource {
-            self.ressource_ami
+        fn ressource(&self) -> OwnerMap<Ressource> {
+            self.ressource_map
         }
 
         fn get_by_coord(&self, coord: Coord) -> Option<Cell> {
@@ -827,9 +881,9 @@ pub mod state {
                 Some(Cell {
                     coord,
                     entity: Entity::Organe(Organe {
-                        id: self.get_new_root(),
+                        id: self.get_new_root_id(),
                         parent_id: Id::zero(self.get_owner()),
-                        root_id: self.get_new_root(),
+                        root_id: self.get_new_root_id(),
                         organe_type: OrganeType::Root,
                         dir: Direction::N,
                         owner: self.get_owner(),
@@ -841,7 +895,7 @@ pub mod state {
         }
 
         fn get_by_id(&self, id: Id) -> Option<OrgWithCoord> {
-            if self.get_new_root() == id {
+            if self.get_new_root_id() == id {
                 Some(OrgWithCoord {
                     coord: self.decision.coord,
                     id,
@@ -879,14 +933,16 @@ pub mod state {
             retour.insert(
                 self.decision.coord,
                 OrganeAmi {
-                    id: self.get_new_root(),
+                    id: self.get_new_root_id(),
                 },
             );
             retour
         }
 
-        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
-            self.previous.organe_ennemy_childs()
+        fn child_map(&self) -> IdMap<HashSet<Id>> {
+            let mut retour = self.previous.child_map();
+            retour.insert(self.get_new_root_id(), Default::default());
+            retour
         }
 
         fn organe_ennemy_location(&self) -> IdMap<Coord> {
@@ -904,9 +960,19 @@ pub mod state {
             self.previous
                 .roots()
                 .update(self.decision.parent_id.get_owner(), |mut ids| {
-                    ids.insert(self.get_new_root());
+                    ids.insert(self.get_new_root_id());
                     ids
                 })
+        }
+        
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
+            let mut retour = self.previous.organes_by_root(root_id);
+            if self.get_new_root_id() == root_id {
+                if let Some(org) = self.get_by_id(self.get_new_root_id()) {
+                    retour.insert(org);
+                };
+            };
+            retour
         }
     }
 
@@ -945,7 +1011,7 @@ pub mod state {
         pub fn new(state: Rc<dyn State>) -> Self {
             let mut detruit_coord: HashSet<Coord> = HashSet::new();
             let mut detruit_id: HashSet<Id> = HashSet::new();
-            let organe_ennemy_childs_map = state.organe_ennemy_childs();
+            let organe_ennemy_childs_map = state.child_map();
             let organe_ennemy_location_map = state.organe_ennemy_location();
             for attacked in state.attacking().into_values() {
                 let (ids, coords) = get_childs_recursive(
@@ -992,12 +1058,12 @@ pub mod state {
             self.previous.max_id()
         }
 
-        fn ressource_ami(&self) -> Ressource {
+        fn ressource(&self) -> OwnerMap<Ressource> {
             self.previous
                 .harvesting()
                 .into_iter()
-                .fold(self.previous.ressource_ami(), |res, (_c, harvesting)| {
-                    res.ajout(harvesting.protein)
+                .fold(self.previous.ressource(), |res, (_c, harvesting)| {
+                    res.update(harvesting.harvester_id.get_owner(), |r|r.ajout_1(harvesting.protein))
                 })
         }
 
@@ -1023,8 +1089,8 @@ pub mod state {
             CoordMap::new()
         }
 
-        fn organe_ennemy_childs(&self) -> IdMap<HashSet<Id>> {
-            let mut childs = self.previous.organe_ennemy_childs();
+        fn child_map(&self) -> IdMap<HashSet<Id>> {
+            let mut childs = self.previous.child_map();
             childs.retain(|key, value| {
                 *value = value.difference(&self.detruit_id).cloned().collect();
                 !self.detruit_id.contains(&key)
@@ -1044,6 +1110,14 @@ pub mod state {
 
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.previous.roots()
+        }
+        
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
+            if self.detruit_id.contains(&root_id) {
+                HashSet::new()
+            } else {
+                self.previous.organes_by_root(root_id)
+            }
         }
     }
 }
@@ -1113,6 +1187,8 @@ pub mod decision {
 
 pub mod molecule {
     use std::fmt::Debug;
+
+    use itertools::structs;
 
     use super::atome::*;
 
@@ -1186,6 +1262,7 @@ pub mod molecule {
         pub protein: Protein,
         pub direction: Direction,
         pub harvester_coord: Coord,
+        pub harvester_id: Id
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1193,7 +1270,7 @@ pub mod molecule {
         pub id: Id,
     }
 
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
     pub struct OrgWithCoord {
         pub coord: Coord,
         pub id: Id,
@@ -1202,7 +1279,19 @@ pub mod molecule {
         pub org_type: OrganeType,
     }
 
-    pub struct Fertilite {
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct ProteinWithCoord {
+        pub coord: Coord,
+        pub protein: Protein,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub struct Fertile {
+        pub coord: Coord,
+        pub protein: Option<Protein>,
+    }
+
+    pub struct GrowCandidate {
         pub parent_id: Id,
     }
 
@@ -1457,22 +1546,30 @@ pub mod atome {
             }
         }
 
-        pub fn ajout(mut self, prot: Protein) -> Self {
+        fn ajout(mut self, prot: Protein, nb: u8) -> Self {
             match prot {
                 Protein::A => {
-                    self.a += 1;
+                    self.a = self.a.saturating_add(nb);
                 }
                 Protein::B => {
-                    self.b += 1;
+                    self.b = self.b.saturating_add(nb);
                 }
                 Protein::C => {
-                    self.c += 1;
+                    self.c = self.c.saturating_add(nb);
                 }
                 Protein::D => {
-                    self.d += 1;
+                    self.d = self.d.saturating_add(nb);
                 }
             };
             self
+        }
+
+        pub fn ajout_1(self, prot: Protein) -> Self {
+            self.ajout(prot, 1)
+        }
+        
+        pub fn ajout_3(self, prot: Protein) -> Self {
+            self.ajout(prot, 3)
         }
     }
 
