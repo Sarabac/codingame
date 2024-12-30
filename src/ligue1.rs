@@ -91,7 +91,7 @@ pub mod ai {
     fn generer_step(state: Rc<dyn State>, root_id: Id) -> impl Iterator<Item = Rc<dyn State>> {
         let wait_step = Rc::new(WaitStep::new(state.clone(), Wait { root_id })) as Rc<dyn State>;
         state
-            .grow_candidate()
+            .grow_candidate(root_id)
             .into_iter()
             .flat_map(|(coord, GrowCandidate { parent_id })| generer_grow(coord, parent_id))
             .filter_map(move |grow| GrowStep::try_new(state.clone(), grow))
@@ -141,7 +141,7 @@ pub mod ai {
             .into_iter()
             .filter(|p| resources.get(Owner::Me).get(p) != 0)
             .count();
-        let nb_ami = state.organes_amis().len() * 3;
+        let nb_ami = state.nb_organe(Owner::Me) * 3;
         let nb_ennemi = state.organe_ennemy_location().len() * 3;
 
         let weight = u32::try_from(1 + note_nb_harvesting + note_resources + nb_ami)
@@ -249,17 +249,20 @@ pub mod state {
         fn ressource(&self) -> OwnerMap<Ressource>;
         fn get_by_coord(&self, coord: Coord) -> Option<Cell>;
         fn get_by_id(&self, id: Id) -> Option<OrgWithCoord>;
+        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord>;
 
         fn roots(&self) -> OwnerMap<HashSet<Id>>;
         fn attacking(&self) -> CoordMap<Attacking>;
         fn harvesting(&self) -> CoordMap<Harvesting>;
         fn empty_cell(&self) -> CoordMap<EmptyCell>;
         fn protein(&self) -> CoordMap<Protein>;
-        fn organes_amis(&self) -> CoordMap<OrganeAmi>;
 
-        fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord>;
         fn child_map(&self) -> IdMap<HashSet<Id>>;
         fn organe_ennemy_location(&self) -> IdMap<Coord>;
+
+        fn nb_organe(&self, owner: Owner) -> usize {
+            self.roots().get(owner).into_iter().map(|root_id|self.organes_by_root(root_id.clone()).len()).sum()
+        }
 
         fn get_neighbour(&self, coor: Coord) -> [Option<Cell>; 4] {
             Direction::all()
@@ -280,23 +283,16 @@ pub mod state {
                 .collect()
         }
 
-        fn grow_candidate(&self) -> CoordMap<GrowCandidate> {
+        fn grow_candidate(&self, root_id: Id) -> CoordMap<GrowCandidate> {
             let empty_or_prot: HashSet<Coord> = self.fertile_cell().keys().cloned().collect();
-            self.organes_amis()
+            self.organes_by_root(root_id)
                 .into_iter()
-                .flat_map(|(coord, org_ami)| {
-                    self.get_neighbour(coord)
+                .flat_map(|org| {
+                    self.get_neighbour(org.coord)
                         .into_iter()
                         .filter_map(|c| c.clone())
                         .filter(|c| empty_or_prot.contains(&c.coord))
-                        .map(move |c| {
-                            (
-                                c.coord,
-                                GrowCandidate {
-                                    parent_id: org_ami.id,
-                                },
-                            )
-                        })
+                        .map(move |c| (c.coord, GrowCandidate { parent_id: org.id }))
                         .collect::<CoordMap<GrowCandidate>>()
                 })
                 .collect()
@@ -332,7 +328,8 @@ pub mod state {
             action_count: ActionCount,
             cells: Vec<Cell>,
         ) -> Self {
-            let ressources_map: OwnerMap<Ressource> = OwnerMap::new(ressources_ami, ressources_ennemy);
+            let ressources_map: OwnerMap<Ressource> =
+                OwnerMap::new(ressources_ami, ressources_ennemy);
             let mut max_id: OwnerMap<Id> = OwnerMap::default();
             let mut root_set: OwnerMap<HashSet<Id>> = OwnerMap::default();
             let coord_cells: CoordMap<Cell> = cells.iter().map(|c| (c.coord, c.clone())).collect();
@@ -366,13 +363,13 @@ pub mod state {
                             root_id: org.root_id,
                             org_type: org.organe_type,
                         };
-                        id_map.insert(org.id,org_with_coord);
-                        organes_by_root.entry(org.root_id).or_default().insert(org_with_coord);
+                        id_map.insert(org.id, org_with_coord);
+                        organes_by_root
+                            .entry(org.root_id)
+                            .or_default()
+                            .insert(org_with_coord);
                         if org.id != org.parent_id {
-                            child_map
-                                .entry(org.parent_id)
-                                .or_default()
-                                .insert(org.id);
+                            child_map.entry(org.parent_id).or_default().insert(org.id);
                         };
 
                         if org.organe_type == OrganeType::Root {
@@ -383,9 +380,8 @@ pub mod state {
                         }
 
                         if org.organe_type == OrganeType::Harvester {
-                            let en_face = coord
-                                .decaler(org.dir)
-                                .and_then(|coo| coord_cells.get(&coo));
+                            let en_face =
+                                coord.decaler(org.dir).and_then(|coo| coord_cells.get(&coo));
                             if let Some(Cell {
                                 coord: coord_prot,
                                 entity: Entity::Protein(prot),
@@ -397,7 +393,7 @@ pub mod state {
                                         protein: prot.clone(),
                                         direction: org.dir,
                                         harvester_coord: coord,
-                                        harvester_id: org.id
+                                        harvester_id: org.id,
                                     },
                                 );
                             };
@@ -409,8 +405,6 @@ pub mod state {
                             }
                             Owner::Me => {
                                 organe_ami_cells.insert(coord, OrganeAmi { id: org.id });
-
-                                
                             }
                         }
                     }
@@ -482,10 +476,6 @@ pub mod state {
             self.prot_cells.clone()
         }
 
-        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
-            self.organe_ami_cells.clone()
-        }
-
         fn attacking(&self) -> CoordMap<Attacking> {
             CoordMap::new()
         }
@@ -509,9 +499,13 @@ pub mod state {
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.root_set.clone()
         }
-        
+
         fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
-            let retour = self.organes_by_root.get(&root_id).cloned().unwrap_or_default();
+            let retour = self
+                .organes_by_root
+                .get(&root_id)
+                .cloned()
+                .unwrap_or_default();
             retour
         }
     }
@@ -563,10 +557,6 @@ pub mod state {
             self.previous.protein()
         }
 
-        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
-            self.previous.organes_amis()
-        }
-
         fn attacking(&self) -> CoordMap<Attacking> {
             self.previous.attacking()
         }
@@ -595,7 +585,7 @@ pub mod state {
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.previous.roots()
         }
-        
+
         fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
             self.previous.organes_by_root(root_id)
         }
@@ -618,7 +608,9 @@ pub mod state {
             if let Some(prot) = fertilite.protein {
                 new_ressource = new_ressource.ajout_3(prot.clone());
             };
-            let ressource_map = previous.ressource().update(decision.parent_id.get_owner(), |_| new_ressource);
+            let ressource_map = previous
+                .ressource()
+                .update(decision.parent_id.get_owner(), |_| new_ressource);
             Some(Self {
                 previous,
                 decision,
@@ -706,7 +698,7 @@ pub mod state {
                         protein: prot.clone(),
                         direction: self.decision.direction,
                         harvester_coord: self.decision.coord,
-                        harvester_id: self.get_last_id()
+                        harvester_id: self.get_last_id(),
                     },
                 );
             };
@@ -722,17 +714,6 @@ pub mod state {
         fn protein(&self) -> CoordMap<Protein> {
             let mut retour = self.previous.protein();
             retour.remove(&self.decision.coord);
-            retour
-        }
-
-        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
-            let mut retour = self.previous.organes_amis();
-            retour.insert(
-                self.decision.coord,
-                OrganeAmi {
-                    id: self.max_id().get(self.get_owner()).clone(),
-                },
-            );
             retour
         }
 
@@ -761,7 +742,10 @@ pub mod state {
 
         fn child_map(&self) -> IdMap<HashSet<Id>> {
             let mut retour = self.previous.child_map();
-            retour.entry(self.decision.parent_id).or_default().insert(self.get_last_id());
+            retour
+                .entry(self.decision.parent_id)
+                .or_default()
+                .insert(self.get_last_id());
             retour
         }
 
@@ -781,7 +765,7 @@ pub mod state {
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.previous.roots()
         }
-        
+
         fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
             let mut retour = self.previous.organes_by_root(root_id);
             if self.get_root_id() == root_id {
@@ -806,20 +790,20 @@ pub mod state {
                 .ressource()
                 .get(decision.parent_id.get_owner())
                 .checked_sub(Ressource::new(1, 1, 1, 1))?;
-                let fertilite = previous.fertile_cell().get(&decision.coord).cloned()?;
-                if let Some(prot) = fertilite.protein {
-                    new_ressource = new_ressource.ajout_3(prot.clone());
-                };
-                let ressource_map = previous.ressource().update(decision.parent_id.get_owner(), |_| new_ressource);
-            let (coor_spore, _) = previous
-                .organes_amis()
-                .into_iter()
-                .find(|(_, v)| v.id == decision.parent_id)?;
+            let fertilite = previous.fertile_cell().get(&decision.coord).cloned()?;
+            if let Some(prot) = fertilite.protein {
+                new_ressource = new_ressource.ajout_3(prot.clone());
+            };
+            let ressource_map = previous
+                .ressource()
+                .update(decision.parent_id.get_owner(), |_| new_ressource);
+
+            let coor_spore = previous.get_by_id(decision.parent_id)?.coord;
             let dir = previous
                 .get_by_coord(coor_spore)
                 .and_then(|cell| match cell.entity {
                     Entity::Organe(organe) => {
-                        Some(organe.dir).filter(|_| organe.owner == Owner::Me)
+                        Some(organe.dir)
                     }
                     _ => None,
                 })?;
@@ -928,17 +912,6 @@ pub mod state {
             retour
         }
 
-        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
-            let mut retour = self.previous.organes_amis();
-            retour.insert(
-                self.decision.coord,
-                OrganeAmi {
-                    id: self.get_new_root_id(),
-                },
-            );
-            retour
-        }
-
         fn child_map(&self) -> IdMap<HashSet<Id>> {
             let mut retour = self.previous.child_map();
             retour.insert(self.get_new_root_id(), Default::default());
@@ -964,7 +937,7 @@ pub mod state {
                     ids
                 })
         }
-        
+
         fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
             let mut retour = self.previous.organes_by_root(root_id);
             if self.get_new_root_id() == root_id {
@@ -1059,12 +1032,14 @@ pub mod state {
         }
 
         fn ressource(&self) -> OwnerMap<Ressource> {
-            self.previous
-                .harvesting()
-                .into_iter()
-                .fold(self.previous.ressource(), |res, (_c, harvesting)| {
-                    res.update(harvesting.harvester_id.get_owner(), |r|r.ajout_1(harvesting.protein))
-                })
+            self.previous.harvesting().into_iter().fold(
+                self.previous.ressource(),
+                |res, (_c, harvesting)| {
+                    res.update(harvesting.harvester_id.get_owner(), |r| {
+                        r.ajout_1(harvesting.protein)
+                    })
+                },
+            )
         }
 
         fn harvesting(&self) -> CoordMap<Harvesting> {
@@ -1081,9 +1056,6 @@ pub mod state {
             self.previous.protein()
         }
 
-        fn organes_amis(&self) -> CoordMap<OrganeAmi> {
-            self.previous.organes_amis()
-        }
 
         fn attacking(&self) -> CoordMap<Attacking> {
             CoordMap::new()
@@ -1111,7 +1083,7 @@ pub mod state {
         fn roots(&self) -> OwnerMap<HashSet<Id>> {
             self.previous.roots()
         }
-        
+
         fn organes_by_root(&self, root_id: Id) -> HashSet<OrgWithCoord> {
             if self.detruit_id.contains(&root_id) {
                 HashSet::new()
@@ -1188,8 +1160,6 @@ pub mod decision {
 pub mod molecule {
     use std::fmt::Debug;
 
-    use itertools::structs;
-
     use super::atome::*;
 
     #[derive(PartialEq, Eq, Debug, Clone, Copy, Default)]
@@ -1262,7 +1232,7 @@ pub mod molecule {
         pub protein: Protein,
         pub direction: Direction,
         pub harvester_coord: Coord,
-        pub harvester_id: Id
+        pub harvester_id: Id,
     }
 
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1567,7 +1537,7 @@ pub mod atome {
         pub fn ajout_1(self, prot: Protein) -> Self {
             self.ajout(prot, 1)
         }
-        
+
         pub fn ajout_3(self, prot: Protein) -> Self {
             self.ajout(prot, 3)
         }
